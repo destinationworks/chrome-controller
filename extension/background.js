@@ -1,4 +1,5 @@
-const WS_URL = 'ws://127.0.0.1:8899';
+const API_KEY = 'B3C65095-74E1-4F48-9EBB-64F5DD6AB078';
+const WS_URL = 'ws://127.0.0.1:8899/?key=' + API_KEY;
 let socket = null;
 let reconnectInterval = null;
 let keepAliveInterval = null;

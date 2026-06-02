@@ -3,6 +3,7 @@ const http = require('http');
 
 const WS_PORT = 8899;
 const HTTP_PORT = 8898;
+const API_KEY = process.env.API_KEY || 'B3C65095-74E1-4F48-9EBB-64F5DD6AB078';
 
 // WebSocket Server
 const wss = new WebSocketServer({ port: WS_PORT });
@@ -10,7 +11,14 @@ let activeClient = null;
 let pendingRequests = new Map();
 let requestIdCounter = 1;
 
-wss.on('connection', function connection(ws) {
+wss.on('connection', function connection(ws, req) {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  if (url.searchParams.get('key') !== API_KEY) {
+    console.log('Rejected WebSocket connection: Invalid API key');
+    ws.close(1008, 'Invalid API key');
+    return;
+  }
+
   console.log('Chrome extension connected!');
   activeClient = ws;
 
@@ -81,6 +89,13 @@ function sendToExtension(action, params = {}) {
 // HTTP Server to accept commands (e.g., via curl)
 const server = http.createServer(async (req, res) => {
   if (req.method === 'POST') {
+    const providedKey = req.headers['x-api-key'] || req.headers['authorization']?.replace(/^Bearer\s+/i, '');
+    if (providedKey !== API_KEY) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'Unauthorized: Invalid or missing API key' }));
+      return;
+    }
+
     let body = '';
     req.on('data', chunk => {
       body += chunk.toString();
