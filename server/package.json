@@ -1,0 +1,12 @@
+{
+  "name": "chrome-controller-server",
+  "version": "1.0.0",
+  "description": "Local server to communicate with Chrome Controller extension",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  }
+}
