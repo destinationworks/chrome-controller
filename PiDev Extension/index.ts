@@ -383,6 +383,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI) {
         action: "getConsoleLogs",
         tabId: params.tabId,
         timeoutMs: params.timeoutMs || 2000,
+        requestTimeoutMs: (params.timeoutMs || 2000) + 5000,
       }, signal));
     },
   });

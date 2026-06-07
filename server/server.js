@@ -83,7 +83,7 @@ function sendToExtension(action, params = {}) {
     }
 
     const id = requestIdCounter++;
-    const timeoutMs = Number(params.timeoutMs || DEFAULT_TIMEOUT_MS);
+    const timeoutMs = Number(params.requestTimeoutMs || params.timeoutMs || DEFAULT_TIMEOUT_MS);
     const timer = setTimeout(() => {
       if (pendingRequests.has(id)) {
         pendingRequests.delete(id);
