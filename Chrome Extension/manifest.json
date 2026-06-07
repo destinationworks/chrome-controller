@@ -12,11 +12,10 @@
     "storage",
     "cookies",
     "debugger",
-    "tabGroups"
+    "tabGroups",
+    "alarms"
   ],
-  "host_permissions": [
-    "<all_urls>"
-  ],
+  "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"
   },

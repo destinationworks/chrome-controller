@@ -2,6 +2,10 @@ const API_KEY = 'B3C65095-74E1-4F48-9EBB-64F5DD6AB078';
 const WS_URL = 'ws://127.0.0.1:8899/?key=' + API_KEY;
 const CONTROLLED_GROUP_TITLE = 'AI Tool';
 const CONTROLLED_GROUP_COLOR = 'cyan';
+const RECONNECT_ALARM = 'reconnect';
+const RECONNECT_INTERVAL_MIN = 1; // 1 min — chrome.alarms minimum period
+const KEEPALIVE_ALARM = 'keepalive';
+const KEEPALIVE_INTERVAL_MIN = 1; // 1 min — keeps worker from suspending
 
 let socket = null;
 let reconnectInterval = null;
@@ -27,6 +31,9 @@ function connect() {
         socket.send(JSON.stringify({ event: 'ping' }));
       }
     }, 20000);
+    // Keep service worker alive — Chrome suspends MV3 workers after ~30s idle.
+    // A recurring alarm prevents suspension, keeping setInterval alive.
+    scheduleKeepaliveAlarm();
   };
 
   socket.onmessage = async (event) => {
@@ -58,7 +65,37 @@ function scheduleReconnect() {
   if (!reconnectInterval) {
     reconnectInterval = setInterval(connect, 5000);
   }
+  // chrome.alarms fires even when the service worker is suspended,
+  // so the reconnect loop survives MV3 idle suspension.
+  try {
+    chrome.alarms.create(RECONNECT_ALARM, { periodInMinutes: RECONNECT_INTERVAL_MIN });
+  } catch (_) {
+    // alarms permission not available (dev mode quirks)
+  }
 }
+
+function scheduleKeepaliveAlarm() {
+  try {
+    chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: KEEPALIVE_INTERVAL_MIN });
+  } catch (_) {}
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === KEEPALIVE_ALARM) {
+    // Keep worker alive by setting another alarm immediately.
+    scheduleKeepaliveAlarm();
+    // Also try to reconnect if disconnected.
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      console.log('Keepalive-triggered reconnect');
+      connect();
+    }
+  } else if (alarm.name === RECONNECT_ALARM) {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      console.log('Alarm-triggered reconnect');
+      connect();
+    }
+  }
+});
 
 function sendSocketResponse(id, payload) {
   if (socket && socket.readyState === WebSocket.OPEN && id) {

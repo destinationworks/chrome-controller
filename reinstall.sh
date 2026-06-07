@@ -194,7 +194,7 @@ health_check() {
     # Extension has a 5-second reconnect loop built into background.js.
     # Wait up to 15 seconds for it to reconnect after a server restart.
     local attempts=0
-    local max_attempts=30  # 30 * 1s = 30 seconds (MV3 service workers can take a while to wake)
+    local max_attempts=30  # 30s wait — extension reconnects via alarm/setInterval afterward
 
     while (( attempts < max_attempts )); do
         local result
@@ -213,7 +213,10 @@ health_check() {
 
         (( attempts++ ))
         if (( attempts < max_attempts )); then
-            info "Waiting for extension reconnect... (attempt $attempts/$max_attempts)"
+            # Print progress every 10 seconds to keep output clean.
+            if (( attempts % 10 == 0 )); then
+                info "Waiting for extension reconnect... (${attempts}s / ${max_attempts}s)"
+            fi
             sleep 1
         fi
     done
