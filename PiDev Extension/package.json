@@ -14,5 +14,8 @@
     "skills": [
       "skills"
     ]
+  },
+  "scripts": {
+    "test": "npx tsx index.test.ts"
   }
 }

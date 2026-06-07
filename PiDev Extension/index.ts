@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import fs from "node:fs";
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:8898";
 const DEFAULT_API_KEY = "B3C65095-74E1-4F48-9EBB-64F5DD6AB078";
@@ -28,7 +29,7 @@ function apiKey() {
 
 function textResult(value: unknown) {
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
+    content: [{ type: "text" as const, text: JSON.stringify(value) }],
     details: value && typeof value === "object" ? (value as Record<string, unknown>) : { value },
   };
 }
@@ -91,12 +92,24 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI) {
     promptSnippet: "List Chrome tabs through the local Chrome Controller bridge.",
     promptGuidelines: [
       "Use chrome_query_tabs to find the tabId before selecting, clicking, or typing into Chrome.",
+      "By default, returns a short summary of tabs. Request 'full' mode only if you need all metadata."
     ],
     parameters: Type.Object({
       queryInfo: Type.Optional(Type.Any({ description: "Chrome tabs.query filter object." })),
+      mode: Type.Optional(Type.Union([Type.Literal("short"), Type.Literal("full")], { description: "Response format mode. Defaults to 'short'." }))
     }),
     async execute(_toolCallId, params, signal) {
-      return textResult(await chromeRequest({ action: "queryTabs", queryInfo: params.queryInfo || {} }, signal));
+      const data = await chromeRequest({ action: "queryTabs", queryInfo: params.queryInfo || {} }, signal);
+      if (params.mode !== "full" && Array.isArray(data.result)) {
+        data.result = data.result.map((tab: any) => ({
+          id: tab.id,
+          title: tab.title,
+          url: tab.url,
+          active: tab.active,
+          windowId: tab.windowId
+        }));
+      }
+      return textResult(data);
     },
   });
 
@@ -234,8 +247,9 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI) {
     parameters: Type.Object({
       tabId: Type.Number({ description: "Chrome tab id." }),
       text: Type.String({ description: "Text to insert into the focused field." }),
-      typingDelayMs: Type.Optional(Type.Number({ description: "Delay per character in milliseconds. Defaults to 65." })),
+      typingDelayMs: Type.Optional(Type.Number({ description: "Delay per character in milliseconds. Defaults to 50." })),
       sound: Type.Optional(Type.Boolean({ description: "Whether to request typing sounds. Defaults to true." })),
+      instant: Type.Optional(Type.Boolean({ description: "Whether to insert text instantly without delay. Defaults to false." })),
     }),
     async execute(_toolCallId, params, signal) {
       return textResult(await chromeRequest(debuggerBatch(params.tabId, [{
@@ -244,8 +258,8 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI) {
         method: "Input.insertText",
         commandParams: {
           text: params.text,
-          animateTyping: true,
-          typingDelayMs: params.typingDelayMs || 65,
+          animateTyping: !params.instant,
+          typingDelayMs: params.typingDelayMs !== undefined ? params.typingDelayMs : 50,
           sound: params.sound !== false,
         },
       }]), signal));
@@ -306,9 +320,10 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI) {
 
       const result = data.result as any;
       const ext = format === "jpeg" ? "jpg" : format;
-      const filePath = `/tmp/browser_last_screenshot.${ext}`;
-      const binary = Buffer.from(result.data, "base64");
-      require("fs").writeFileSync(filePath, binary);
+      const filePath = `/tmp/browser_last_screenshot_${Date.now()}.${ext}`;
+      const base64Data = typeof result.data === "string" ? result.data : result.data?.data;
+      const binary = Buffer.from(base64Data, "base64");
+      fs.writeFileSync(filePath, binary);
 
       return textResult({ success: true, path: filePath });
     },
@@ -328,15 +343,25 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI) {
       expression: Type.String({ description: "JavaScript expression to evaluate in the page context." }),
       returnByValue: Type.Optional(Type.Boolean({ description: "Whether to return the result by value instead of by reference. Defaults to true." })),
       awaitPromise: Type.Optional(Type.Boolean({ description: "Whether to await promises returned by the expression. Defaults to true." })),
+      untruncated: Type.Optional(Type.Boolean({ description: "Whether to return full string result even if very large. Defaults to false." })),
     }),
     async execute(_toolCallId, params, signal) {
-      return textResult(await chromeRequest({
+      const data = await chromeRequest({
         action: "evaluateOnPage",
         tabId: params.tabId,
         expression: params.expression,
         returnByValue: params.returnByValue !== false,
         awaitPromise: params.awaitPromise !== false,
-      }, signal));
+      }, signal);
+
+      if (!params.untruncated && data && data.result && data.result.result && data.result.result.type === "string") {
+        const val = data.result.result.value;
+        if (typeof val === "string" && val.length > 50000) {
+          data.result.result.value = val.substring(0, 50000) + "\n...[TRUNCATED. Pass untruncated:true to bypass]";
+        }
+      }
+
+      return textResult(data);
     },
   });
 
