@@ -1,0 +1,405 @@
+#chrome-controller-overlay-root,
+#chrome-controller-overlay-root * {
+  box-sizing: border-box;
+}
+
+#chrome-controller-overlay-root {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  pointer-events: none;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #f7fbff;
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+
+#chrome-controller-overlay-root.chrome-controller-selected,
+#chrome-controller-overlay-root.chrome-controller-has-cursor {
+  opacity: 1;
+}
+
+.chrome-controller-frame {
+  position: fixed;
+  inset: 8px;
+  border: 2px solid rgba(53, 202, 255, 0.88);
+  border-radius: 10px;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.18),
+    inset 0 0 36px rgba(31, 151, 255, 0.18),
+    0 0 0 1px rgba(8, 14, 28, 0.28),
+    0 0 32px rgba(22, 174, 255, 0.32);
+  opacity: 0;
+  transition: opacity 160ms ease, border-color 160ms ease;
+}
+
+.chrome-controller-selected .chrome-controller-frame {
+  opacity: 1;
+}
+
+.chrome-controller-flash .chrome-controller-frame {
+  animation: chrome-controller-frame-pulse 560ms ease-out;
+}
+
+.chrome-controller-sparkles {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  opacity: 0;
+}
+
+.chrome-controller-selected .chrome-controller-sparkles {
+  opacity: 1;
+}
+
+.chrome-controller-sparkle {
+  position: fixed;
+  border-radius: 999px;
+  background: rgba(196, 242, 255, 0.42);
+  box-shadow: 0 0 7px rgba(112, 233, 255, 0.24);
+  filter: blur(0.2px);
+  pointer-events: none;
+  animation: chrome-controller-sparkle 4.1s ease-in-out forwards;
+}
+
+.chrome-controller-hud {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  width: 42px;
+  min-height: 42px;
+  max-height: 42px;
+  overflow: hidden;
+  padding: 10px;
+  border: 1px solid rgba(125, 231, 255, 0.34);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(7, 13, 22, 0.92), rgba(13, 30, 42, 0.86)),
+    radial-gradient(circle at top left, rgba(72, 220, 255, 0.25), transparent 38%);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28), 0 0 30px rgba(33, 184, 255, 0.18);
+  backdrop-filter: blur(12px);
+  pointer-events: auto;
+  transform: translateY(-4px);
+  transition:
+    width 160ms ease,
+    max-height 160ms ease,
+    padding 160ms ease,
+    transform 160ms ease,
+    border-color 160ms ease;
+}
+
+.chrome-controller-selected .chrome-controller-hud {
+  transform: translateY(0);
+}
+
+.chrome-controller-hud:hover,
+.chrome-controller-hud:focus-within {
+  width: min(360px, calc(100vw - 36px));
+  max-height: 260px;
+  padding: 12px 13px;
+}
+
+.chrome-controller-status-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.chrome-controller-status-dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #56f0b2;
+  box-shadow: 0 0 0 5px rgba(86, 240, 178, 0.14), 0 0 18px rgba(86, 240, 178, 0.85);
+}
+
+.chrome-controller-status-glyph {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: #eaffff;
+  font-size: 15px;
+  line-height: 1;
+  text-shadow: 0 0 14px rgba(112, 233, 255, 0.88);
+}
+
+.chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-status-row {
+  justify-content: center;
+  gap: 0;
+}
+
+.chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-status-dot {
+  position: absolute;
+  right: 7px;
+  top: 7px;
+  width: 7px;
+  height: 7px;
+  box-shadow: 0 0 0 4px rgba(86, 240, 178, 0.12), 0 0 16px rgba(86, 240, 178, 0.85);
+}
+
+.chrome-controller-hud:hover .chrome-controller-status-dot,
+.chrome-controller-hud:focus-within .chrome-controller-status-dot {
+  position: static;
+  width: 9px;
+  height: 9px;
+}
+
+.chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-status-glyph {
+  width: 20px;
+  height: 20px;
+}
+
+#chrome-controller-overlay-root[data-status*="moving"] .chrome-controller-status-dot,
+#chrome-controller-overlay-root[data-status*="mouse"] .chrome-controller-status-dot {
+  background: #47d7ff;
+  box-shadow: 0 0 0 5px rgba(71, 215, 255, 0.14), 0 0 18px rgba(71, 215, 255, 0.85);
+}
+
+#chrome-controller-overlay-root[data-status*="typing"] .chrome-controller-status-dot {
+  background: #ffda6a;
+  box-shadow: 0 0 0 5px rgba(255, 218, 106, 0.14), 0 0 18px rgba(255, 218, 106, 0.85);
+}
+
+.chrome-controller-status {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-status,
+.chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-tab,
+.chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-coords,
+.chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-typing,
+.chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-feed {
+  display: none;
+}
+
+.chrome-controller-tab {
+  margin-top: 8px;
+  overflow: hidden;
+  color: rgba(233, 248, 255, 0.92);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chrome-controller-coords {
+  margin-top: 4px;
+  color: rgba(185, 227, 240, 0.78);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.chrome-controller-typing {
+  margin-top: 10px;
+  min-height: 30px;
+  max-height: 54px;
+  overflow: hidden;
+  padding: 7px 9px;
+  border: 1px solid rgba(255, 218, 106, 0.34);
+  border-radius: 7px;
+  background: rgba(255, 218, 106, 0.1);
+  color: #fff2ba;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.chrome-controller-feed {
+  display: grid;
+  gap: 5px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chrome-controller-feed li {
+  display: flex;
+  min-width: 0;
+  justify-content: space-between;
+  gap: 10px;
+  color: rgba(213, 238, 247, 0.84);
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.chrome-controller-feed b {
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.62);
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chrome-controller-cursor {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 30px;
+  height: 30px;
+  opacity: 0;
+  transform: translate3d(-80px, -80px, 0);
+  transition: opacity 120ms ease;
+  will-change: transform;
+}
+
+.chrome-controller-has-cursor .chrome-controller-cursor {
+  opacity: 1;
+}
+
+.chrome-controller-cursor-core {
+  position: absolute;
+  left: -5px;
+  top: -5px;
+  width: 10px;
+  height: 10px;
+  border: 2px solid #07111d;
+  border-radius: 999px;
+  background: #70e9ff;
+  box-shadow: 0 0 0 2px rgba(112, 233, 255, 0.35), 0 0 22px rgba(112, 233, 255, 0.9);
+}
+
+.chrome-controller-cursor-ring {
+  position: absolute;
+  left: -14px;
+  top: -14px;
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(112, 233, 255, 0.9);
+  border-radius: 999px;
+  opacity: 0;
+  transform: scale(0.72);
+  animation: chrome-controller-cursor-ring 1.2s ease-in-out infinite;
+}
+
+.chrome-controller-pressing .chrome-controller-cursor-ring {
+  opacity: 1;
+}
+
+.chrome-controller-pressing .chrome-controller-cursor-core {
+  background: #ffda6a;
+  box-shadow: 0 0 0 2px rgba(255, 218, 106, 0.35), 0 0 24px rgba(255, 218, 106, 0.95);
+}
+
+.chrome-controller-trail,
+.chrome-controller-ripple,
+.chrome-controller-keyburst {
+  position: fixed;
+  pointer-events: none;
+}
+
+.chrome-controller-trail {
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  border-radius: 999px;
+  background: rgba(112, 233, 255, 0.7);
+  animation: chrome-controller-trail 420ms ease-out forwards;
+}
+
+.chrome-controller-ripple {
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  border: 2px solid #70e9ff;
+  border-radius: 999px;
+  box-shadow: 0 0 20px rgba(112, 233, 255, 0.65);
+  animation: chrome-controller-ripple 720ms ease-out forwards;
+}
+
+.chrome-controller-ripple-click {
+  border-color: #ffda6a;
+  box-shadow: 0 0 22px rgba(255, 218, 106, 0.72);
+}
+
+.chrome-controller-keyburst {
+  max-width: 120px;
+  overflow: hidden;
+  padding: 3px 7px;
+  border: 1px solid rgba(255, 218, 106, 0.45);
+  border-radius: 6px;
+  background: rgba(9, 13, 20, 0.9);
+  color: #fff2ba;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  animation: chrome-controller-keyburst 680ms ease-out forwards;
+}
+
+@keyframes chrome-controller-frame-pulse {
+  0% { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18), 0 0 0 rgba(112, 233, 255, 0); }
+  35% { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.24), 0 0 0 8px rgba(112, 233, 255, 0.16), 0 0 42px rgba(112, 233, 255, 0.48); }
+  100% { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18), 0 0 0 rgba(112, 233, 255, 0); }
+}
+
+@keyframes chrome-controller-sparkle {
+  0% { opacity: 0; transform: scale(0.75) translate3d(0, 0, 0); }
+  22% { opacity: 0.36; }
+  64% { opacity: 0.24; }
+  100% { opacity: 0; transform: scale(1.05) translate3d(var(--cc-dust-x), var(--cc-dust-y), 0); }
+}
+
+@keyframes chrome-controller-cursor-ring {
+  0%, 100% { transform: scale(0.72); }
+  50% { transform: scale(1.08); }
+}
+
+@keyframes chrome-controller-trail {
+  0% { opacity: 0.72; transform: scale(1); }
+  100% { opacity: 0; transform: scale(0.2); }
+}
+
+@keyframes chrome-controller-ripple {
+  0% { opacity: 0.95; transform: scale(0.4); }
+  100% { opacity: 0; transform: scale(3.3); }
+}
+
+@keyframes chrome-controller-keyburst {
+  0% { opacity: 0; transform: translate3d(0, 6px, 0) scale(0.88); }
+  18% { opacity: 1; }
+  100% { opacity: 0; transform: translate3d(18px, -30px, 0) scale(1); }
+}
+
+@media (max-width: 520px) {
+  .chrome-controller-hud {
+    left: auto;
+    right: 12px;
+    top: 12px;
+    width: 42px;
+  }
+
+  .chrome-controller-hud:hover,
+  .chrome-controller-hud:focus-within {
+    left: 12px;
+    right: 12px;
+    width: auto;
+  }
+
+  .chrome-controller-frame {
+    inset: 6px;
+    border-radius: 8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #chrome-controller-overlay-root,
+  #chrome-controller-overlay-root * {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+  }
+}
