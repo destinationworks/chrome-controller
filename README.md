@@ -66,6 +66,17 @@ pi -e "./PiDev Extension"
 
 The package registers Chrome tools and a `chrome-controller` skill. Use `chrome_controller_health`, then `chrome_query_tabs` or `chrome_create_tab`, then `chrome_select_tab`, `chrome_mouse`, `chrome_type_text`, or `chrome_batch`.
 
+## Antigravity
+
+To use this plugin with Antigravity:
+
+1. Copy or symlink the `PiDev Extension` folder to your Antigravity plugins directory:
+   ```bash
+   ln -s "$PWD/PiDev Extension" ~/.gemini/config/plugins/chrome-controller
+   ```
+2. Antigravity will automatically detect `plugin.json` and load the `chrome-controller` skill and its tools.
+
+
 ## Managed Tab Visibility
 
 Every controlled tab is moved into a visible Chrome tab group named `AI Tool`.
