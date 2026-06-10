@@ -315,14 +315,19 @@ function spawnSparkle() {
   if (!layer) return;
 
   const sparkle = document.createElement('span');
-  const size = 2 + Math.round(Math.random() * 3);
+  const width = 2 + Math.round(Math.random() * 4);
+  const height = Math.max(1, width - Math.round(Math.random() * 2));
   sparkle.className = 'chrome-controller-sparkle';
   sparkle.style.left = `${6 + Math.random() * 88}vw`;
   sparkle.style.top = `${8 + Math.random() * 82}vh`;
-  sparkle.style.width = `${size}px`;
-  sparkle.style.height = `${size}px`;
-  sparkle.style.setProperty('--cc-dust-x', `${Math.round((Math.random() - 0.5) * 18)}px`);
-  sparkle.style.setProperty('--cc-dust-y', `${-10 - Math.round(Math.random() * 18)}px`);
+  sparkle.style.width = `${width}px`;
+  sparkle.style.height = `${height}px`;
+  sparkle.style.setProperty('--cc-dust-x', `${Math.round((Math.random() - 0.5) * 60)}px`);
+  sparkle.style.setProperty('--cc-dust-y', `${Math.round((Math.random() - 0.5) * 60)}px`);
+  sparkle.style.setProperty('--cc-dust-rx', Math.random().toFixed(2));
+  sparkle.style.setProperty('--cc-dust-ry', Math.random().toFixed(2));
+  sparkle.style.setProperty('--cc-dust-rz', Math.random().toFixed(2));
+  sparkle.style.setProperty('--cc-dust-rot', `${Math.round((Math.random() - 0.5) * 720)}deg`);
   sparkle.style.animationDelay = `${Math.random() * 220}ms`;
   layer.appendChild(sparkle);
   setTimeout(() => sparkle.remove(), 4400);

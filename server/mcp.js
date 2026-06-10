@@ -5,7 +5,7 @@ const API_KEY = process.env.API_KEY || 'B3C65095-74E1-4F48-9EBB-64F5DD6AB078';
 
 async function sendCommand(action, params = {}) {
   return new Promise((resolve, reject) => {
-    const data = JSON.stringify({ action, ...params });
+    const data = JSON.stringify({ ...params, action });
     const req = http.request({
       hostname: 'localhost',
       port: HTTP_PORT,
@@ -104,6 +104,7 @@ async function main() {
           inputSchema: {
             type: 'object',
             properties: {
+              tabId: { type: 'number', description: 'The tab ID to evaluate in' },
               type: { type: 'string', enum: ['move', 'press', 'release', 'click', 'wheel'] },
               x: { type: 'number', description: 'X coordinate' },
               y: { type: 'number', description: 'Y coordinate' },
@@ -130,6 +131,7 @@ async function main() {
           inputSchema: {
             type: 'object',
             properties: {
+              tabId: { type: 'number', description: 'The tab ID to evaluate in' },
               format: { type: 'string', enum: ['jpeg', 'png'], default: 'jpeg' },
               quality: { type: 'number', description: 'Quality 0-100 (default 80)' }
             }
@@ -141,6 +143,7 @@ async function main() {
           inputSchema: {
             type: 'object',
             properties: {
+              tabId: { type: 'number', description: 'The tab ID to evaluate in' },
               expression: { type: 'string', description: 'JavaScript code to execute' },
               awaitPromise: { type: 'boolean', description: 'Wait for promise to resolve', default: true },
               returnByValue: { type: 'boolean', description: 'Return actual value instead of object reference', default: true }
@@ -180,8 +183,15 @@ async function main() {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
       let action = request.params.name;
-      // Map MCP tool names to the HTTP actions
-      if (action.startsWith('chrome_')) {
+      if (action === 'chrome_evaluate') {
+        action = 'evaluateOnPage';
+      } else if (action === 'chrome_screenshot') {
+        action = 'captureScreenshot';
+      } else if (action === 'chrome_console_logs') {
+        action = 'getConsoleLogs';
+      } else if (action === 'chrome_cleanup_ai_tabs') {
+        action = 'cleanupManagedTabs';
+      } else if (action.startsWith('chrome_')) {
         action = action.replace(/^chrome_/, '');
         // Convert snake_case to camelCase
         action = action.replace(/_([a-z])/g, (g) => g[1].toUpperCase());
@@ -199,11 +209,12 @@ async function main() {
 
       // For screenshot, format as an image response if possible or return base64
       if (request.params.name === 'chrome_screenshot' && result && result.data) {
+        const base64Data = typeof result.data === 'string' ? result.data : result.data.data;
         return {
           content: [
             {
               type: 'image',
-              data: result.data,
+              data: base64Data,
               mimeType: `image/${request.params.arguments?.format || 'jpeg'}`
             }
           ]

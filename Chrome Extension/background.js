@@ -8,8 +8,6 @@ const KEEPALIVE_ALARM = 'keepalive';
 const KEEPALIVE_INTERVAL_MIN = 1; // 1 min — keeps worker from suspending
 
 let socket = null;
-let reconnectInterval = null;
-let keepAliveInterval = null;
 let controlledTabId = null;
 let controlledGroupIdsByWindow = new Map();
 
@@ -19,20 +17,8 @@ function connect() {
 
   socket.onopen = () => {
     console.log('Connected to local WebSocket server');
-    if (reconnectInterval) {
-      clearInterval(reconnectInterval);
-      reconnectInterval = null;
-    }
-    if (keepAliveInterval) {
-      clearInterval(keepAliveInterval);
-    }
-    keepAliveInterval = setInterval(() => {
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ event: 'ping' }));
-      }
-    }, 20000);
-    // Keep service worker alive — Chrome suspends MV3 workers after ~30s idle.
-    // A recurring alarm prevents suspension, keeping setInterval alive.
+    // No setInterval — MV3 suspends the worker after ~30s idle.
+    // Ping + keepalive handled by chrome.alarms.
     scheduleKeepaliveAlarm();
   };
 
@@ -48,10 +34,6 @@ function connect() {
   socket.onclose = () => {
     console.log('Disconnected from local WebSocket server');
     socket = null;
-    if (keepAliveInterval) {
-      clearInterval(keepAliveInterval);
-      keepAliveInterval = null;
-    }
     scheduleReconnect();
   };
 
@@ -62,9 +44,6 @@ function connect() {
 }
 
 function scheduleReconnect() {
-  if (!reconnectInterval) {
-    reconnectInterval = setInterval(connect, 5000);
-  }
   // chrome.alarms fires even when the service worker is suspended,
   // so the reconnect loop survives MV3 idle suspension.
   try {
@@ -82,12 +61,10 @@ function scheduleKeepaliveAlarm() {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === KEEPALIVE_ALARM) {
-    // Keep worker alive by setting another alarm immediately.
+    // Send ping to keep WebSocket alive.
     scheduleKeepaliveAlarm();
-    // Also try to reconnect if disconnected.
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      console.log('Keepalive-triggered reconnect');
-      connect();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ event: 'ping' }));
     }
   } else if (alarm.name === RECONNECT_ALARM) {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
@@ -461,7 +438,7 @@ async function executeAction(action, params = {}) {
     }
   } else if (action === 'releaseTab') {
     result = await releaseControlledTab(params.tabId, params.reason || 'releaseTab');
-  } else if (action === 'captureScreenshot') {
+  } else if (action === 'captureScreenshot' || action === 'screenshot') {
     await setControlledTab(params.tabId, 'captureScreenshot');
     try {
       await chrome.debugger.attach({ tabId: params.tabId }, params.requiredVersion || '1.3');

@@ -55,10 +55,11 @@
 .chrome-controller-sparkle {
   position: fixed;
   border-radius: 999px;
-  background: rgba(196, 242, 255, 0.42);
-  box-shadow: 0 0 7px rgba(112, 233, 255, 0.24);
+  background: rgba(196, 242, 255, 0.9);
+  box-shadow: 0 0 7px rgba(112, 233, 255, 0.6), 0 0 2px rgba(8, 14, 28, 0.3);
   filter: blur(0.2px);
   pointer-events: none;
+  opacity: 0;
   animation: chrome-controller-sparkle 4.1s ease-in-out forwards;
 }
 
@@ -348,10 +349,10 @@
 }
 
 @keyframes chrome-controller-sparkle {
-  0% { opacity: 0; transform: scale(0.75) translate3d(0, 0, 0); }
-  22% { opacity: 0.36; }
-  64% { opacity: 0.24; }
-  100% { opacity: 0; transform: scale(1.05) translate3d(var(--cc-dust-x), var(--cc-dust-y), 0); }
+  0% { opacity: 0; transform: scale(0.75) translate3d(0, 0, 0) rotate3d(var(--cc-dust-rx, 0), var(--cc-dust-ry, 0), var(--cc-dust-rz, 1), 0deg); }
+  22% { opacity: 0.8; }
+  64% { opacity: 0.5; }
+  100% { opacity: 0; transform: scale(1.05) translate3d(var(--cc-dust-x), var(--cc-dust-y), 0) rotate3d(var(--cc-dust-rx, 0), var(--cc-dust-ry, 0), var(--cc-dust-rz, 1), var(--cc-dust-rot, 0deg)); }
 }
 
 @keyframes chrome-controller-cursor-ring {
