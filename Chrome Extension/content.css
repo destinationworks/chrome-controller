@@ -179,7 +179,8 @@
 .chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-tab,
 .chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-coords,
 .chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-typing,
-.chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-feed {
+.chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-feed,
+.chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-settings {
   display: none;
 }
 
@@ -242,6 +243,57 @@
   font-weight: 550;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.chrome-controller-audio-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  margin: 0 4px;
+  padding: 0;
+  border: 1px solid rgba(112, 233, 255, 0.25);
+  border-radius: 5px;
+  background: rgba(7, 17, 29, 0.6);
+  color: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+
+.chrome-controller-hud:hover .chrome-controller-audio-btn,
+.chrome-controller-hud:focus-within .chrome-controller-audio-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.chrome-controller-audio-btn:hover {
+  background: rgba(112, 233, 255, 0.18);
+}
+
+.chrome-controller-settings {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(112, 233, 255, 0.15);
+}
+
+.chrome-controller-settings-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: rgba(233, 248, 255, 0.88);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.chrome-controller-settings-item input[type="checkbox"] {
+  accent-color: #70e9ff;
+  cursor: pointer;
 }
 
 .chrome-controller-cursor {

@@ -10,8 +10,10 @@ const state = {
   originalTitle: null,
   originalFavicons: null,
   audioContext: null,
+  audioMuted: true,
   lastSoundAt: 0,
   sparkleTimer: null,
+  overlayHidden: false,
 };
 
 function truncate(value, length) {
@@ -36,7 +38,14 @@ function ensureOverlay() {
       <div class="chrome-controller-status-row">
         <span class="chrome-controller-status-dot"></span>
         <span class="chrome-controller-status-glyph" aria-hidden="true">🤖</span>
+        <button class="chrome-controller-audio-btn" aria-label="Unmute typing sounds" title="Unmute typing sounds">🔇</button>
         <span class="chrome-controller-status">Controller idle</span>
+      </div>
+      <div class="chrome-controller-settings">
+        <label class="chrome-controller-settings-item">
+          <input type="checkbox" class="chrome-controller-hide-toggle" />
+          <span>Hide overlay</span>
+        </label>
       </div>
       <div class="chrome-controller-tab">No controlled tab</div>
       <div class="chrome-controller-coords">x -, y -</div>
@@ -276,6 +285,7 @@ function spawnKeyBurst(text) {
 }
 
 function playTypingSound() {
+  if (state.audioMuted) return;
   const now = performance.now();
   if (now - state.lastSoundAt < 26) return;
   state.lastSoundAt = now;
@@ -286,11 +296,11 @@ function playTypingSound() {
 
     if (!state.audioContext) {
       state.audioContext = new AudioContextClass();
+      if (state.audioContext.state === 'suspended') {
+        state.audioContext.resume().catch(() => {});
+      }
     }
     const context = state.audioContext;
-    if (context.state === 'suspended') {
-      context.resume().catch(() => {});
-    }
 
     const oscillator = context.createOscillator();
     const gain = context.createGain();
@@ -305,6 +315,34 @@ function playTypingSound() {
     oscillator.stop(context.currentTime + 0.045);
   } catch (err) {
     // Audio may be blocked until the page receives a user gesture.
+  }
+}
+
+function setAudioMuted(muted) {
+  state.audioMuted = muted;
+  const root = ensureOverlay();
+  const btn = root.querySelector('.chrome-controller-audio-btn');
+  if (!btn) return;
+  btn.textContent = muted ? '🔇' : '🔊';
+  btn.setAttribute('aria-label', muted ? 'Unmute typing sounds' : 'Mute typing sounds');
+  btn.setAttribute('title', muted ? 'Unmute typing sounds' : 'Mute typing sounds');
+
+  if (!muted && !state.audioContext) {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (AudioContextClass) {
+      state.audioContext = new AudioContextClass();
+      if (state.audioContext.state === 'suspended') {
+        state.audioContext.resume().catch(() => {});
+      }
+    }
+  }
+}
+
+function setOverlayHidden(hidden) {
+  state.overlayHidden = hidden;
+  const root = document.getElementById(ROOT_ID);
+  if (root) {
+    root.style.display = hidden ? 'none' : '';
   }
 }
 
@@ -450,3 +488,23 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     sendResponse({ success: true });
   }
 });
+
+// Wire up interactive controls (once, after overlay is created).
+ensureOverlay();
+
+const root = document.getElementById(ROOT_ID);
+const audioBtn = root.querySelector('.chrome-controller-audio-btn');
+if (audioBtn) {
+  audioBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setAudioMuted(!state.audioMuted);
+  });
+}
+
+const hideToggle = root.querySelector('.chrome-controller-hide-toggle');
+if (hideToggle) {
+  hideToggle.addEventListener('change', (e) => {
+    e.stopPropagation();
+    setOverlayHidden(e.target.checked);
+  });
+}

@@ -26,7 +26,37 @@ Use this skill when the user asks Pi to control Chrome, inspect browser tabs, cl
 9. Use `chrome_console_logs` to collect console output (log, warn, error) from a page.
 10. Use `chrome_release_tab` when control is finished but the tab should remain open.
 11. Use `chrome_cleanup_ai_tabs` to release active markers, or with `closeTabs: true` only when the user explicitly wants to close managed tabs.
-12. Use `chrome_batch` for multiple independent actions in parallel; use `mode: "sequential"` for ordered flows.
+12. Use `chrome_batch` for multiple independent actions in parallel; use `mode: "sequential"` for ordered flows. Each action in the `actions` array must have an `action` field with the server-side action name (see table below), not the MCP tool name.
+
+## Batch Action Names
+
+Use these action names in `chrome_batch` `actions` arrays:
+
+| Action | Key Params | Notes |
+|---|---|---|
+| `createTab` | `url`, `active` | Creates and selects tab |
+| `queryTabs` | `queryInfo` | Query tabs (same as `chrome.tabs.query`) |
+| `selectTab` | `tabId`, `activate` | Mark tab as controlled |
+| `releaseTab` | `tabId`, `reason` | Release control, keep tab open |
+| `screenshot` | `tabId`, `screenshotOptions` | PNG/JPEG screenshot via CDP |
+| `evaluateOnPage` | `tabId`, `expression`, `returnByValue`, `awaitPromise` | `Runtime.evaluate` via CDP |
+| `getConsoleLogs` | `tabId`, `timeoutMs` | Collect `Runtime.consoleAPICalled` events |
+| `sendCommand` | `tabId`, `method`, `commandParams` | Raw CDP command |
+| `ensureDebugger` | `tabId` | Attach debugger (idempotent) |
+| `visualizeAction` | `tabId`, `type`, `x`, `y`, `detail` | Trigger HUD overlay effect |
+| `cleanupManagedTabs` | `closeTabs` | Release or close AI-managed tabs |
+| `batch` | `actions`, `mode` | Nested batch |
+
+Example:
+```json
+{
+  "mode": "parallel",
+  "actions": [
+    {"action": "queryTabs"},
+    {"action": "evaluateOnPage", "tabId": 123, "expression": "1+1"}
+  ]
+}
+```
 
 ## Notes
 
