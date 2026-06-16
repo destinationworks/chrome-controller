@@ -354,12 +354,231 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI) {
         awaitPromise: params.awaitPromise !== false,
       }, signal);
 
-      if (!params.untruncated && data && data.result && data.result.result && data.result.result.type === "string") {
-        const val = data.result.result.value;
+      const response = data as any;
+      if (!params.untruncated && response && response.result && response.result.result && response.result.result.type === "string") {
+        const val = response.result.result.value;
         if (typeof val === "string" && val.length > 50000) {
-          data.result.result.value = val.substring(0, 50000) + "\n...[TRUNCATED. Pass untruncated:true to bypass]";
+          response.result.result.value = val.substring(0, 50000) + "\n...[TRUNCATED. Pass untruncated:true to bypass]";
         }
       }
+
+      return textResult(data);
+    },
+  });
+
+  pi.registerTool({
+    name: "chrome_extract_content",
+    label: "Chrome Extract Content",
+    description: "Extract structured text content from a Chrome tab page (headings, paragraphs, links, tables, lists). Returns organized sections without requiring manual CSS selectors.",
+    promptSnippet: "Extract structured page content from a Chrome tab automatically.",
+    promptGuidelines: [
+      "Use chrome_extract_content instead of chrome_evaluate when you need to read page content (headings, body text, links, tables).",
+      "Prefer this over manual DOM queries for general content extraction — it handles SPAs, server-rendered pages, and dynamic content.",
+      "Use maxDepth to limit heading hierarchy (default 3) and maxLength to cap output size.",
+    ],
+    parameters: Type.Object({
+      tabId: Type.Number({ description: "Chrome tab id." }),
+      maxDepth: Type.Optional(Type.Number({ description: "Maximum heading depth to extract (h1-h6). Defaults to 3." })),
+      maxLength: Type.Optional(Type.Number({ description: "Maximum total output length in characters. Defaults to 15000." })),
+      includeLinks: Type.Optional(Type.Boolean({ description: "Whether to include extracted links. Defaults to true." })),
+      includeTables: Type.Optional(Type.Boolean({ description: "Whether to include table data. Defaults to true." })),
+      untruncated: Type.Optional(Type.Boolean({ description: "Whether to return full result even if very large. Defaults to false." })),
+    }),
+    async execute(_toolCallId, params, signal) {
+      const data = await chromeRequest({
+        action: "evaluateOnPage",
+        tabId: params.tabId,
+        expression: `(() => {
+          const maxDepth = ${params.maxDepth || 3};
+          const maxLength = ${params.untruncated ? 1000000 : (params.maxLength || 15000)};
+          const includeLinks = ${params.includeLinks !== false};
+          const includeTables = ${params.includeTables !== false};
+
+          const result = { headings: [], sections: [], links: [], tables: [] };
+          let totalLen = 0;
+
+          // Extract headings
+          const headings = document.querySelectorAll('h1, h2, h3, h4, h5, h6');
+          headings.forEach(h => {
+            const level = parseInt(h.tagName[1]);
+            if (level <= maxDepth && h.offsetParent) {
+              result.headings.push({ level, text: h.innerText.trim().substring(0, 200) });
+              totalLen += h.innerText.length;
+            }
+          });
+
+          // Extract visible paragraphs and text blocks
+          const textBlocks = [];
+          const blockSelectors = 'p, li, blockquote, dt, dd, figcaption, td, th, .content, .text, .description';
+          document.querySelectorAll(blockSelectors).forEach(el => {
+            if (el.offsetParent && !el.closest('script, style, noscript, .chrome-controller-overlay-root')) {
+              const text = el.innerText.trim();
+              if (text.length > 10) textBlocks.push(text);
+            }
+          });
+
+          // Deduplicate and group into sections
+          const seen = new Set();
+          textBlocks.forEach(text => {
+            const key = text.substring(0, 50);
+            if (!seen.has(key) && text.length <= 500) {
+              seen.add(key);
+              result.sections.push(text.substring(0, 500));
+              totalLen += text.length;
+            }
+          });
+
+          // Extract links
+          if (includeLinks) {
+            document.querySelectorAll('a[href]').forEach(a => {
+              if (a.offsetParent && a.innerText.trim()) {
+                const text = a.innerText.trim().substring(0, 150);
+                const href = a.getAttribute('href') || '';
+                if (!seen.has('l:' + href.substring(0, 30))) {
+                  seen.add('l:' + href.substring(0, 30));
+                  result.links.push({ text, href });
+                  totalLen += text.length + href.length;
+                }
+              }
+            });
+          }
+
+          // Extract tables
+          if (includeTables) {
+            document.querySelectorAll('table').forEach(t => {
+              if (t.offsetParent) {
+                const rows = [];
+                t.querySelectorAll('tr').forEach(tr => {
+                  const cells = [];
+                  tr.querySelectorAll('td, th').forEach(cell => {
+                    cells.push(cell.innerText.trim().substring(0, 200));
+                  });
+                  if (cells.length > 0) rows.push(cells);
+                  if (rows.length >= 20) return;
+                });
+                if (rows.length > 0 && rows.length <= 50) {
+                  result.tables.push(rows);
+                  totalLen += rows.length * 100;
+                }
+              }
+            });
+          }
+
+          // Truncate if over maxLength
+          if (totalLen > maxLength) {
+            result.sections = result.sections.filter(s => s.length < 200);
+            result.links = result.links.slice(0, 10);
+          }
+
+          return result;
+        })()`,
+        returnByValue: true,
+        awaitPromise: true,
+      }, signal);
+
+      if (!params.untruncated && data && (data as ChromeResponse).result) {
+        const res = (data as ChromeResponse).result as { headings: any[]; sections: any[]; links: any[]; tables: any[][] };
+        if (res && typeof res === 'object') {
+          const estLen = JSON.stringify(res).length;
+          if (estLen > 50000) {
+            if (res.sections) res.sections = res.sections.slice(0, 5);
+            if (res.links) res.links = res.links.slice(0, 10);
+            if (res.tables) res.tables = res.tables.slice(0, 2);
+            (data as ChromeResponse).result = res;
+          }
+        }
+      }
+
+      return textResult(data);
+    },
+  });
+
+  pi.registerTool({
+    name: "chrome_extract_regions",
+    label: "Chrome Extract Regions",
+    description: "Extract visible text regions/containers from a Chrome tab page. Useful for listing job cards, product items, search results, or any repeated content blocks.",
+    promptSnippet: "Extract all visible content regions from a Chrome tab page.",
+    promptGuidelines: [
+      "Use chrome_extract_regions to find repeated content blocks (job listings, search results, product cards) without knowing CSS selectors.",
+      "Returns regions with their class, text content, and any links inside.",
+      "Use maxResults to limit output when pages have many elements.",
+    ],
+    parameters: Type.Object({
+      tabId: Type.Number({ description: "Chrome tab id." }),
+      minTextLength: Type.Optional(Type.Number({ description: "Minimum text length to include a region. Defaults to 30." })),
+      maxResults: Type.Optional(Type.Number({ description: "Maximum number of regions to return. Defaults to 50." })),
+      untruncated: Type.Optional(Type.Boolean({ description: "Whether to return full text even if very large. Defaults to false." })),
+    }),
+    async execute(_toolCallId, params, signal) {
+      const minLen = params.minTextLength || 30;
+      const maxResults = params.maxResults || 50;
+      const maxTextLen = params.untruncated ? 5000 : 500;
+
+      const data = await chromeRequest({
+        action: "evaluateOnPage",
+        tabId: params.tabId,
+        expression: `(() => {
+          const regions = [];
+          const seen = new Set();
+
+          // Find card-like containers
+          const selectors = [
+            '[class*="card"], [class*="item"], [class*="result"], [class*="post"],
+            [class*="listing"], [class*="entry"], [class*="job"], [class*="vacancy"],
+            [class*="product"], [class*="review"], [class*="comment"], [class*="article"]
+          ].join(',');
+
+          document.querySelectorAll(selectors).forEach(el => {
+            if (!el.offsetParent) return;
+            if (el.closest('.chrome-controller-overlay-root')) return;
+
+            const text = el.innerText.trim();
+            if (text.length < ${minLen}) return;
+
+            const cls = typeof el.className === 'string' ? el.className : '';
+            const key = cls + ':' + text.substring(0, 40);
+            if (seen.has(key)) return;
+            seen.add(key);
+
+            const links = [];
+            el.querySelectorAll('a[href]').forEach(a => {
+              links.push({ text: a.innerText.trim().substring(0, 100), href: a.getAttribute('href') });
+            });
+
+            regions.push({
+              class: cls,
+              text: text.substring(0, ${maxTextLen}),
+              links: links.slice(0, 3)
+            });
+
+            if (regions.length >= ${maxResults}) return;
+          });
+
+          // Also try common structural blocks
+          if (regions.length < 5) {
+            document.querySelectorAll('section, article, main, .container, .wrapper, div[class*="body"], div[class*="content"]').forEach(el => {
+              if (!el.offsetParent || el.closest('.chrome-controller-overlay-root')) return;
+              const text = el.innerText.trim();
+              if (text.length < ${minLen}) return;
+              const cls = typeof el.className === 'string' ? el.className : '';
+              const key = cls + ':' + text.substring(0, 40);
+              if (seen.has(key)) return;
+              seen.add(key);
+
+              regions.push({
+                class: cls,
+                text: text.substring(0, ${maxTextLen}),
+                links: []
+              });
+              if (regions.length >= ${maxResults}) return;
+            });
+          }
+
+          return regions;
+        })()`,
+        returnByValue: true,
+        awaitPromise: true,
+      }, signal);
 
       return textResult(data);
     },

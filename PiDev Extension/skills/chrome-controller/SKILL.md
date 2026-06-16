@@ -21,7 +21,7 @@ Use this skill when the user asks Pi to control Chrome, inspect browser tabs, cl
 4. Controlled tabs are placed into the visible Chrome tab group `AI Tool` and get a robot title marker while actively controlled.
 5. Use `chrome_mouse` for real viewport mouse actions. It auto-visualizes move, press, release, and click on the page.
 6. Use `chrome_type_text` only after the target input/editor is focused. It types characters one by one with visible feedback and optional typing sound.
-7. Use `chrome_screenshot` to capture a tab screenshot. Returns the image directly as an attachment.
+7. Use `chrome_screenshot` to capture a tab screenshot. Returns the image directly as an attachment. To read and inspect the captured image, use the `read` tool on the returned `path` value (e.g., `/tmp/browser_last_screenshot_*.png`).
 8. Use `chrome_evaluate` to run arbitrary JavaScript in the page context.
 9. Use `chrome_console_logs` to collect console output (log, warn, error) from a page.
 10. Use `chrome_release_tab` when control is finished but the tab should remain open.
