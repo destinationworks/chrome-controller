@@ -1,6 +1,6 @@
 ---
 name: chrome-controller
-description: Use Chrome Controller from Pi to inspect tabs, open/select a controlled tab, move/click the mouse, insert text, capture screenshots, evaluate JavaScript, read console logs, and batch multiple Chrome actions through the local extension bridge.
+description: Use Chrome Controller from Pi to inspect tabs, open/select a controlled tab, move/click the mouse, insert text, capture screenshots, record short video captures, evaluate JavaScript, read console logs, and batch multiple Chrome actions through the local extension bridge.
 ---
 
 # Chrome Controller
@@ -22,6 +22,7 @@ Use this skill when the user asks Pi to control Chrome, inspect browser tabs, cl
 5. Use `chrome_mouse` for real viewport mouse actions. It auto-visualizes move, press, release, and click on the page.
 6. Use `chrome_type_text` only after the target input/editor is focused. It types characters one by one with visible feedback and optional typing sound.
 7. Use `chrome_screenshot` to capture a tab screenshot. Returns the image directly as an attachment. To read and inspect the captured image, use the `read` tool on the returned `path` value (e.g., `/tmp/browser_last_screenshot_*.png`).
+8. Use `chrome_capture_video` to record a short sequence of screenshots (video capture) from a tab. Specify `fps`, `duration`, `format`, and `quality`. Returns frame metadata and inline images for the last 4 frames.
 8. Use `chrome_evaluate` to run arbitrary JavaScript in the page context.
 9. Use `chrome_console_logs` to collect console output (log, warn, error) from a page.
 10. Use `chrome_release_tab` when control is finished but the tab should remain open.
@@ -39,6 +40,7 @@ Use these action names in `chrome_batch` `actions` arrays:
 | `selectTab` | `tabId`, `activate` | Mark tab as controlled |
 | `releaseTab` | `tabId`, `reason` | Release control, keep tab open |
 | `screenshot` | `tabId`, `screenshotOptions` | PNG/JPEG screenshot via CDP |
+| `captureVideo` | `tabId`, `fps`, `duration`, `format`, `quality` | Sequence of CDP screenshots at specified FPS |
 | `evaluateOnPage` | `tabId`, `expression`, `returnByValue`, `awaitPromise` | `Runtime.evaluate` via CDP |
 | `getConsoleLogs` | `tabId`, `timeoutMs` | Collect `Runtime.consoleAPICalled` events |
 | `sendCommand` | `tabId`, `method`, `commandParams` | Raw CDP command |

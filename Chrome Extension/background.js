@@ -453,6 +453,41 @@ async function executeAction(action, params = {}) {
       params.screenshotOptions || { format: 'png', quality: 100 }
     );
     result = { success: true, data: cmdResult, format: (params.screenshotOptions && params.screenshotOptions.format) || 'png' };
+  } else if (action === 'captureVideo') {
+    await setControlledTab(params.tabId, 'captureVideo');
+    try {
+      await chrome.debugger.attach({ tabId: params.tabId }, params.requiredVersion || '1.3');
+    } catch (err) {
+      if (!/already attached/i.test(err.toString())) {
+        throw err;
+      }
+    }
+
+    const fps = Number(params.fps) || 5;
+    const duration = Number(params.duration) || 3;
+    const format = params.format || 'jpeg';
+    const quality = Number(params.quality) || 80;
+    const intervalMs = Math.round(1000 / fps);
+    const totalFrames = Math.round(duration * fps);
+    const frames = [];
+
+    for (let i = 0; i < totalFrames; i++) {
+      try {
+        const frame = await chrome.debugger.sendCommand(
+          { tabId: params.tabId },
+          'Page.captureScreenshot',
+          { format, quality }
+        );
+        frames.push({ index: i, timestamp: Date.now(), data: frame });
+        if (i < totalFrames - 1) {
+          await sleep(intervalMs);
+        }
+      } catch (err) {
+        frames.push({ index: i, timestamp: Date.now(), error: err.toString() });
+      }
+    }
+
+    result = { frames, count: frames.length, fps, duration, format };
   } else if (action === 'evaluateOnPage') {
     await setControlledTab(params.tabId, 'evaluateOnPage');
     try {

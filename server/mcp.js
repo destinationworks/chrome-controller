@@ -138,6 +138,20 @@ async function main() {
           },
         },
         {
+          name: 'chrome_capture_video',
+          description: 'Capture a short video (sequence of screenshots) from the controlled tab. Returns base64-encoded frames.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              tabId: { type: 'number', description: 'The tab ID to capture' },
+              fps: { type: 'number', description: 'Frames per second (default 5)', default: 5 },
+              duration: { type: 'number', description: 'Duration in seconds (default 3)', default: 3 },
+              format: { type: 'string', enum: ['jpeg', 'png'], default: 'jpeg' },
+              quality: { type: 'number', description: 'Quality 0-100 (default 80)', default: 80 }
+            }
+          },
+        },
+        {
           name: 'chrome_evaluate',
           description: 'Evaluate JavaScript in the page context.',
           inputSchema: {
@@ -189,6 +203,8 @@ async function main() {
         action = 'captureScreenshot';
       } else if (action === 'chrome_console_logs') {
         action = 'getConsoleLogs';
+      } else if (action === 'chrome_capture_video') {
+        action = 'captureVideo';
       } else if (action === 'chrome_cleanup_ai_tabs') {
         action = 'cleanupManagedTabs';
       } else if (action.startsWith('chrome_')) {
@@ -218,6 +234,32 @@ async function main() {
               mimeType: `image/${request.params.arguments?.format || 'jpeg'}`
             }
           ]
+        };
+      }
+
+      // For captureVideo, return frames as images with metadata summary
+      if (request.params.name === 'chrome_capture_video' && result && result.frames) {
+        const frames = result.frames;
+        const images = frames
+          .filter(f => f.data)
+          .slice(-4) // last 4 frames as images
+          .map(f => ({
+            type: 'image',
+            data: f.data,
+            mimeType: `image/${result.format || 'jpeg'}`
+          }));
+        const summary = {
+          totalFrames: frames.length,
+          fps: result.fps,
+          duration: result.duration,
+          format: result.format,
+          errors: frames.filter(f => f.error).length,
+        };
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify(summary, null, 2) },
+            ...images,
+          ],
         };
       }
 
