@@ -245,7 +245,7 @@ async function main() {
           .slice(-4) // last 4 frames as images
           .map(f => ({
             type: 'image',
-            data: f.data,
+            data: typeof f.data === 'string' ? f.data : (f.data.data || ''),
             mimeType: `image/${result.format || 'jpeg'}`
           }));
         const summary = {
