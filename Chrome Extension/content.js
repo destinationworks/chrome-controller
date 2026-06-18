@@ -27,6 +27,7 @@ function ensureOverlay() {
 
   root = document.createElement('div');
   root.id = ROOT_ID;
+  root.className = 'chrome-controller-overlay-root';
   root.innerHTML = `
     <div class="chrome-controller-frame"></div>
     <div class="chrome-controller-sparkles" aria-hidden="true"></div>
@@ -56,7 +57,29 @@ function ensureOverlay() {
 
   const mount = document.body || document.documentElement;
   mount.appendChild(root);
+  wireOverlayControls(root);
   return root;
+}
+
+function wireOverlayControls(root) {
+  if (root.dataset.chromeControllerControlsWired === 'true') return;
+  root.dataset.chromeControllerControlsWired = 'true';
+
+  const audioBtn = root.querySelector('.chrome-controller-audio-btn');
+  if (audioBtn) {
+    audioBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setAudioMuted(!state.audioMuted);
+    });
+  }
+
+  const hideToggle = root.querySelector('.chrome-controller-hide-toggle');
+  if (hideToggle) {
+    hideToggle.addEventListener('change', (e) => {
+      e.stopPropagation();
+      setOverlayHidden(e.target.checked);
+    });
+  }
 }
 
 function setRootClass(name, enabled) {
@@ -488,23 +511,3 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     sendResponse({ success: true });
   }
 });
-
-// Wire up interactive controls (once, after overlay is created).
-ensureOverlay();
-
-const root = document.getElementById(ROOT_ID);
-const audioBtn = root.querySelector('.chrome-controller-audio-btn');
-if (audioBtn) {
-  audioBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    setAudioMuted(!state.audioMuted);
-  });
-}
-
-const hideToggle = root.querySelector('.chrome-controller-hide-toggle');
-if (hideToggle) {
-  hideToggle.addEventListener('change', (e) => {
-    e.stopPropagation();
-    setOverlayHidden(e.target.checked);
-  });
-}
