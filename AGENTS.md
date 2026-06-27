@@ -2,6 +2,10 @@
 
 This file contains instructions for automated coding agents.
 
+## User Updates
+
+While actively working, reread `user-updates.md` for new instructions at least once per minute and incorporate any new guidance before continuing.
+
 ## Refactoring Guidelines (LSP/MCP)
 
 Before executing any semantic refactoring (TypeScript/JavaScript, HTML, Rust), the agent must:
