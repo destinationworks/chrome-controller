@@ -1,33 +1,87 @@
 # Chrome Controller
 
-Local Chrome control bridge with:
+A local Chrome control bridge for AI agents, with:
 
-- a Chrome MV3 extension in `Chrome Extension`
-- a Node HTTP/WebSocket server in `server`
-- a Pi extension package in `PiDev Extension`
+- **`Chrome Extension/`** — MV3 Chrome extension (WebSocket client + CDP overlay HUD)
+- **`src/server.ts`** — WebSocket/HTTP relay server (compiled to `dist/server.js`)
+- **`src/mcp.ts`** — MCP stdio server (compiled to `dist/mcp.js`)
+- **`src/index.ts`** — Pi / Antigravity extension entry point
 
-## Run
+## Quick Start
+
+### 1. Install dependencies and build
 
 ```bash
-cd server
+npm install && npm run build
+```
+
+### 2. Start the relay server
+
+```bash
 npm start
+# or: node dist/server.js
 ```
 
-Then load `Chrome Extension` as an unpacked Chrome extension.
+The HTTP API listens on `http://127.0.0.1:8898` and the WebSocket on `ws://127.0.0.1:8899` by default.
 
-The HTTP API listens on `http://127.0.0.1:8898` by default. Override with:
+### 3. Load the Chrome extension
 
-```bash
-HTTP_PORT=8898 WS_PORT=8899 API_KEY=your-key npm start
+Open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select the `Chrome Extension/` folder.
+
+Once connected, you'll see `Chrome extension connected!` in the server terminal.
+
+## Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `HTTP_PORT` | `8898` | HTTP API port |
+| `WS_PORT` | `8899` | WebSocket port |
+| `API_KEY` | `B3C65095-74E1-4F48-9EBB-64F5DD6AB078` | Auth key |
+| `REQUEST_TIMEOUT_MS` | `10000` | Per-command timeout |
+| `MAX_BATCH_ACTIONS` | `50` | Max actions per batch request |
+
+## Pi Extension Setup
+
+Add the repo root to `~/.pi/agent/settings.json`:
+
+```json
+{
+  "packages": ["/path/to/chrome-controller"]
+}
 ```
 
-## Health
+Restart Pi. The `chrome-controller` skill and all `chrome_*` tools load automatically.
+
+## MCP Server Setup
+
+Add to your Antigravity / Claude Desktop config:
+
+```json
+{
+  "mcpServers": {
+    "chrome-controller": {
+      "command": "node",
+      "args": ["/path/to/chrome-controller/dist/mcp.js"],
+      "env": {
+        "HTTP_PORT": "8898",
+        "API_KEY": "B3C65095-74E1-4F48-9EBB-64F5DD6AB078"
+      }
+    }
+  }
+}
+```
+
+> **Note:** The relay server (`npm start`) must be running separately. The MCP server only proxies tool calls to it.
+
+## Usage Examples
+
+### Health Check
 
 ```bash
 curl http://127.0.0.1:8898/health
 ```
 
-## Single Action
+### Single Action
 
 ```bash
 curl -X POST http://127.0.0.1:8898 \
@@ -36,53 +90,44 @@ curl -X POST http://127.0.0.1:8898 \
   -d '{"action":"queryTabs"}'
 ```
 
-## Batch Actions
-
-Parallel mode is the default:
+### Batch Actions (parallel)
 
 ```bash
 curl -X POST http://127.0.0.1:8898 \
   -H "Content-Type: application/json" \
   -H "x-api-key: B3C65095-74E1-4F48-9EBB-64F5DD6AB078" \
-  -d '{"mode":"parallel","actions":[{"action":"queryTabs"},{"action":"queryTabs"}]}'
+  -d '{"mode":"parallel","actions":[{"action":"queryTabs"},{"action":"createTab","url":"https://example.com"}]}'
 ```
 
-Use sequential mode for ordered browser interactions:
+### Sequential mouse click via CDP
 
 ```bash
 curl -X POST http://127.0.0.1:8898 \
   -H "Content-Type: application/json" \
   -H "x-api-key: B3C65095-74E1-4F48-9EBB-64F5DD6AB078" \
-  -d '{"mode":"sequential","actions":[{"action":"ensureDebugger","tabId":123},{"action":"sendCommand","tabId":123,"method":"Input.dispatchMouseEvent","commandParams":{"type":"mouseMoved","x":200,"y":160,"button":"none"}}]}'
+  -d '{
+    "mode": "sequential",
+    "actions": [
+      {"action": "ensureDebugger", "tabId": 123},
+      {"action": "sendCommand", "tabId": 123, "method": "Input.dispatchMouseEvent",
+       "commandParams": {"type": "mousePressed", "x": 200, "y": 160, "button": "left", "clickCount": 1}}
+    ]
+  }'
 ```
 
-## Pi
-
-Run Pi with the local extension package:
+## Running Tests
 
 ```bash
-pi -e "./PiDev Extension"
+npm test
 ```
 
-The package registers Chrome tools and a `chrome-controller` skill. Use `chrome_controller_health`, then `chrome_query_tabs` or `chrome_create_tab`, then `chrome_select_tab`, `chrome_mouse`, `chrome_type_text`, or `chrome_batch`.
-
-## Antigravity
-
-To use this plugin with Antigravity:
-
-1. Copy or symlink the `PiDev Extension` folder to your Antigravity plugins directory:
-   ```bash
-   ln -s "$PWD/PiDev Extension" ~/.gemini/config/plugins/chrome-controller
-   ```
-2. Antigravity will automatically detect `plugin.json` and load the `chrome-controller` skill and its tools.
-
+Tests cover the HTTP/WebSocket relay server (with a mock extension client) and the Pi extension tool logic.
 
 ## Managed Tab Visibility
 
-Every controlled tab is moved into a visible Chrome tab group named `AI Tool`.
-While a tab is actively controlled, the page title is prefixed with `🤖 ` and the in-page HUD shows the current action, coordinates, and recent activity.
+Every controlled tab is moved into a visible Chrome tab group named **AI Tool**. While actively controlled, the page title is prefixed with `🤖 ` and the in-page HUD shows the current action, coordinates, and recent activity.
 
-Release the active marker but keep managed tabs open:
+Release markers but keep managed tabs open:
 
 ```bash
 curl -X POST http://127.0.0.1:8898 \
@@ -91,7 +136,7 @@ curl -X POST http://127.0.0.1:8898 \
   -d '{"action":"cleanupManagedTabs"}'
 ```
 
-Close all tabs in the `AI Tool` group:
+Close all tabs in the AI Tool group:
 
 ```bash
 curl -X POST http://127.0.0.1:8898 \

@@ -1,0 +1,32 @@
+{
+  "name": "chrome-controller",
+  "version": "1.0.0",
+  "description": "Local Chrome control bridge — Pi extension + MCP server + WebSocket/HTTP relay",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "mcp": "node dist/mcp.js",
+    "test": "npx tsx --test src/server.test.ts src/index.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "pi": {
+    "extensions": ["src/index.ts"],
+    "skills": ["skills"]
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ws": "^8.16.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

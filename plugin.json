@@ -1,0 +1,17 @@
+{
+  "name": "chrome-controller",
+  "version": "1.0.0",
+  "description": "Local Chrome control bridge for AI agents — Pi plugin + MCP server",
+  "author": {
+    "name": "User"
+  },
+  "license": "MIT",
+  "keywords": [
+    "chrome",
+    "controller",
+    "browser",
+    "mcp",
+    "pi",
+    "ai"
+  ]
+}
