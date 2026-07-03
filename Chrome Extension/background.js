@@ -19,6 +19,7 @@ function connect() {
     console.log('Connected to local WebSocket server');
     // No setInterval — MV3 suspends the worker after ~30s idle.
     // Ping + keepalive handled by chrome.alarms.
+    try { chrome.alarms.clear(RECONNECT_ALARM); } catch (_) {}
     scheduleKeepaliveAlarm();
   };
 
@@ -33,6 +34,8 @@ function connect() {
 
   socket.onclose = () => {
     console.log('Disconnected from local WebSocket server');
+    // Clear the scheduled reconnect alarm so we don't accumulate stale alarms.
+    try { chrome.alarms.clear(RECONNECT_ALARM); } catch (_) {}
     socket = null;
     scheduleReconnect();
   };
