@@ -384,6 +384,40 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
     },
   });
 
+  // ── Capture Video ──────────────────────────────────────────────────────────
+  pi.registerTool({
+    name: 'chrome_capture_video',
+    label: 'Chrome Capture Video',
+    description: 'Capture a short video (sequence of screenshots) from a Chrome tab. Returns a directory of frames.',
+    promptSnippet: 'Capture a short video sequence from a Chrome tab through Chrome Controller.',
+    promptGuidelines: [
+      'Use chrome_capture_video when you need to record visual changes over time on a page.',
+      'Returns a directory containing sequential frame images.',
+    ],
+    parameters: Type.Object({
+      tabId: Type.Number({ description: 'Chrome tab id.' }),
+      fps: Type.Optional(Type.Number({ description: 'Frames per second. Defaults to 5.' })),
+      duration: Type.Optional(Type.Number({ description: 'Duration in seconds. Defaults to 3.' })),
+      format: Type.Optional(Type.Union([Type.Literal('jpeg'), Type.Literal('png')])),
+      quality: Type.Optional(Type.Number({ description: 'Quality 0-100. Defaults to 80.' })),
+    }),
+    async execute(_toolCallId, params, signal) {
+      const data = await chromeRequest(
+        {
+          action: 'captureVideo',
+          tabId: params.tabId,
+          fps: params.fps ?? 5,
+          duration: params.duration ?? 3,
+          format: params.format ?? 'jpeg',
+          quality: params.quality ?? 80,
+        },
+        signal
+      );
+
+      return textResult(data);
+    },
+  });
+
   // ── Evaluate ────────────────────────────────────────────────────────────────
   pi.registerTool({
     name: 'chrome_evaluate',

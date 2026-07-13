@@ -218,6 +218,47 @@ async function main(): Promise<void> {
         },
       },
       {
+        name: 'chrome_extract_content',
+        description: 'Extract structured text content from a page (headings, paragraphs, links, tables).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            tabId: { type: 'number', description: 'Chrome tab id' },
+            maxDepth: { type: 'number', description: 'Maximum heading depth (h1-h6). Default 3' },
+            maxLength: { type: 'number', description: 'Max total output length. Default 15000' },
+            includeLinks: { type: 'boolean', description: 'Include extracted links. Default true' },
+            includeTables: { type: 'boolean', description: 'Include table data. Default true' },
+          },
+          required: ['tabId'],
+        },
+      },
+      {
+        name: 'chrome_extract_regions',
+        description: 'Extract visible content regions/cards from a page (job listings, search results, product cards, etc.).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            tabId: { type: 'number', description: 'Chrome tab id' },
+            minTextLength: { type: 'number', description: 'Minimum text length per region. Default 30' },
+            maxResults: { type: 'number', description: 'Maximum regions to return. Default 50' },
+          },
+          required: ['tabId'],
+        },
+      },
+      {
+        name: 'chrome_batch',
+        description: 'Send multiple Chrome Controller actions in one request, either in parallel or sequential order.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            mode: { type: 'string', enum: ['parallel', 'sequential'], description: 'Execution mode. Default parallel' },
+            stopOnError: { type: 'boolean', description: 'Stop executing remaining actions on first error (sequential only)' },
+            actions: { type: 'array', items: { type: 'object' }, description: 'Array of action payloads' },
+          },
+          required: ['actions'],
+        },
+      },
+      {
         name: 'chrome_cleanup_ai_tabs',
         description: 'Release control of all AI tabs, optionally closing them.',
         inputSchema: {
@@ -293,6 +334,106 @@ async function main(): Promise<void> {
           errors: frames.filter((f) => f.error).length,
         };
         return { content: [{ type: 'text', text: JSON.stringify(summary, null, 2) }, ...images] };
+      }
+
+      // Extract content — build expression and send as evaluateOnPage
+      if (toolName === 'chrome_extract_content') {
+        const maxDepth = Number(args.maxDepth) || 3;
+        const maxLength = Number(args.maxLength) || 15000;
+        const includeLinks = args.includeLinks !== false;
+        const includeTables = args.includeTables !== false;
+        const expression = `(() => {
+          const maxDepth = ${maxDepth};
+          const maxLength = ${maxLength};
+          const includeLinks = ${includeLinks};
+          const includeTables = ${includeTables};
+          const result = { headings: [], sections: [], links: [], tables: [] };
+          let totalLen = 0;
+          document.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(h => {
+            const level = parseInt(h.tagName[1]);
+            if (level <= maxDepth && h.offsetParent) {
+              result.headings.push({ level, text: h.innerText.trim().substring(0, 200) });
+              totalLen += h.innerText.length;
+            }
+          });
+          const textBlocks = [];
+          document.querySelectorAll('p, li, blockquote, dt, dd, figcaption, td, th, .content, .text, .description').forEach(el => {
+            if (el.offsetParent && !el.closest('script, style, noscript, .chrome-controller-overlay-root')) {
+              const text = el.innerText.trim();
+              if (text.length > 10) textBlocks.push(text);
+            }
+          });
+          const seen = new Set();
+          textBlocks.forEach(text => {
+            const key = text.substring(0, 50);
+            if (!seen.has(key) && text.length <= 500) { seen.add(key); result.sections.push(text.substring(0, 500)); totalLen += text.length; }
+          });
+          if (includeLinks) {
+            document.querySelectorAll('a[href]').forEach(a => {
+              if (a.offsetParent && a.innerText.trim()) {
+                const text = a.innerText.trim().substring(0, 150); const href = a.getAttribute('href') || '';
+                if (!seen.has('l:' + href.substring(0, 30))) { seen.add('l:' + href.substring(0, 30)); result.links.push({ text, href }); totalLen += text.length + href.length; }
+              }
+            });
+          }
+          if (includeTables) {
+            document.querySelectorAll('table').forEach(t => {
+              if (t.offsetParent) {
+                const rows = [];
+                t.querySelectorAll('tr').forEach(tr => { const cells = []; tr.querySelectorAll('td, th').forEach(cell => { cells.push(cell.innerText.trim().substring(0, 200)); }); if (cells.length > 0) rows.push(cells); if (rows.length >= 20) return; });
+                if (rows.length > 0 && rows.length <= 50) { result.tables.push(rows); totalLen += rows.length * 100; }
+              }
+            });
+          }
+          if (totalLen > maxLength) { result.sections = result.sections.filter(s => s.length < 200); result.links = result.links.slice(0, 10); }
+          return result;
+        })()`;
+        return sendCommand('evaluateOnPage', { tabId: args.tabId, expression, returnByValue: true, awaitPromise: true }).then((r) => ({
+          content: [{ type: 'text', text: JSON.stringify(r, null, 2) }],
+        }));
+      }
+
+      // Extract regions — build expression and send as evaluateOnPage
+      if (toolName === 'chrome_extract_regions') {
+        const minLen = Number(args.minTextLength) || 30;
+        const maxResults = Number(args.maxResults) || 50;
+        const maxTextLen = 500;
+        const expression = `(() => {
+          const regions = []; const seen = new Set();
+          document.querySelectorAll('[class*="card"], [class*="item"], [class*="result"], [class*="post"], [class*="listing"], [class*="entry"], [class*="job"], [class*="vacancy"], [class*="product"], [class*="review"], [class*="comment"], [class*="article"]').forEach(el => {
+            if (!el.offsetParent || el.closest('.chrome-controller-overlay-root')) return;
+            const text = el.innerText.trim();
+            if (text.length < ${minLen}) return;
+            const cls = typeof el.className === 'string' ? el.className : '';
+            const key = cls + ':' + text.substring(0, 40);
+            if (seen.has(key)) return; seen.add(key);
+            const links = []; el.querySelectorAll('a[href]').forEach(a => { links.push({ text: a.innerText.trim().substring(0, 100), href: a.getAttribute('href') }); });
+            regions.push({ class: cls, text: text.substring(0, ${maxTextLen}), links: links.slice(0, 3) });
+            if (regions.length >= ${maxResults}) return;
+          });
+          if (regions.length < 5) {
+            document.querySelectorAll('section, article, main, .container, .wrapper').forEach(el => {
+              if (!el.offsetParent || el.closest('.chrome-controller-overlay-root')) return;
+              const text = el.innerText.trim();
+              if (text.length < ${minLen}) return;
+              const cls = typeof el.className === 'string' ? el.className : '';
+              const key = cls + ':' + text.substring(0, 40);
+              if (seen.has(key)) return; seen.add(key);
+              regions.push({ class: cls, text: text.substring(0, ${maxTextLen}), links: [] });
+              if (regions.length >= ${maxResults}) return;
+            });
+          }
+          return regions;
+        })()`;
+        return sendCommand('evaluateOnPage', { tabId: args.tabId, expression, returnByValue: true, awaitPromise: true }).then((r) => ({
+          content: [{ type: 'text', text: JSON.stringify(r, null, 2) }],
+        }));
+      }
+
+      // Handle batch — send mode + actions as batch request
+      if (toolName === 'chrome_batch') {
+        const result = await sendCommand('batch', { mode: args.mode, stopOnError: args.stopOnError, actions: args.actions });
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       }
 
       return {
