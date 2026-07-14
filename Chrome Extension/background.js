@@ -12,6 +12,20 @@ let controlledTabId = null;
 let controlledGroupIdsByWindow = new Map();
 
 function connect() {
+  // Guard against duplicate connections (e.g. alarm firing while startup connect is in progress)
+  if (socket && socket.readyState === WebSocket.CONNECTING) {
+    console.log('Already connecting, skipping duplicate connect()');
+    return;
+  }
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    console.log('Already connected, skipping connect()');
+    return;
+  }
+  // Close existing non-active socket before creating new one
+  if (socket) {
+    try { socket.onclose = null; socket.close(); } catch (_) {}
+  }
+
   console.log('Attempting to connect to ' + WS_URL);
   socket = new WebSocket(WS_URL);
 

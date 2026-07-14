@@ -152,8 +152,8 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
       }
     });
 
-    ws.on('close', () => {
-      console.log('Chrome extension disconnected');
+    ws.on('close', (code, reason) => {
+      console.log(`Chrome extension disconnected (code=${code}, reason=${reason?.toString() || 'none'})`);
       if (activeClient === ws) activeClient = null;
       for (const [, { reject }] of pendingRequests) {
         reject(new Error('Extension disconnected'));
