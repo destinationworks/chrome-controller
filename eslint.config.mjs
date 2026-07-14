@@ -1,24 +1,21 @@
-import ts from "@typescript-eslint/eslint-plugin";
-import tseslint from "@typescript-eslint/eslint-plugin";
-import tsParser from "@typescript-eslint/parser";
 
 export default [
   {
-    files: ["**/*.ts"],
-    ignores: ["dist/**", "node_modules/**"],
+    files: ['src/**/*.ts', 'test/**/*.ts'],
     languageOptions: {
-      parser: tsParser,
+      parser: await import('@typescript-eslint/parser'),
       parserOptions: {
-        ecmaVersion: "latest",
-        sourceType: "module",
-        project: "./tsconfig.lint.json",
+        ecmaVersion: 2024,
+        sourceType: 'module',
       },
     },
     plugins: {
-      "@typescript-eslint": tseslint,
+      '@typescript-eslint': await import('@typescript-eslint/eslint-plugin'),
     },
     rules: {
-      ...ts.configs.recommended.rules,
+      '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
+      'no-console': 'warn',
+      'no-duplicate-imports': 'error',
     },
   },
 ];

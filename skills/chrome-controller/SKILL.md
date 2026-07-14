@@ -5,37 +5,29 @@ description: Use Chrome Controller from Pi to inspect tabs, open/select a contro
 
 # Chrome Controller
 
-Use this skill when the user asks you to control Chrome, inspect browser tabs, click or type in a page, capture screenshots, evaluate JavaScript, read console logs, or run several browser actions through the local Chrome Controller extension.
+Use this skill when the user asks you to control Chrome, inspect browser tabs, click or type in a page, capture screenshots, evaluate JavaScript, read console logs, or run browser actions through the local Chrome Controller extension.
 
 ## Required Components
 
-Chrome Controller has three parts that must all be running:
-
-1. **Chrome Extension** — load the `Chrome Extension/` folder as an unpacked MV3 extension in Chrome.
-2. **Bridge Server** — one-command automated startup:
-   ```bash
-   cd /path/to/chrome-controller
-   npm start   # kills stale server, rebuilds if needed, starts & verifies healthy
-   ```
-3. **Pi/Antigravity Extension** — registered automatically via `settings.json` (see Install section).
+1. **Chrome Extension** — load `Chrome Extension/` as an unpacked MV3 extension in Chrome.
+2. **Bridge Server** — `cd /path/to/chrome-controller && npm start` (kills stale server, rebuilds, starts & verifies healthy).
+3. **Pi/Antigravity Extension** — registered via `settings.json`.
 
 ## Install
 
 ### Pi
 
-Add the repo path to `~/.pi/agent/settings.json`:
+Add to `~/.pi/agent/settings.json`:
 
 ```json
-{
-  "packages": ["/path/to/chrome-controller"]
-}
+{"packages": ["/path/to/chrome-controller"]}
 ```
 
-Then restart Pi. The `chrome-controller` skill and all `chrome_*` tools load automatically.
+Restart Pi. The `chrome-controller` skill and all `chrome_*` tools load automatically.
 
 ### Antigravity (MCP)
 
-Add to your Antigravity `settings.json` or Claude Desktop config:
+Add to `settings.json` or Claude Desktop config:
 
 ```json
 {
@@ -43,80 +35,63 @@ Add to your Antigravity `settings.json` or Claude Desktop config:
     "chrome-controller": {
       "command": "node",
       "args": ["/path/to/chrome-controller/dist/mcp.js"],
-      "env": {
-        "HTTP_PORT": "8898",
-        "API_KEY": "B3C65095-74E1-4F48-9EBB-64F5DD6AB078"
-      }
+      "env": {"HTTP_PORT": "8898", "API_KEY": "B3C65095-..."}
     }
   }
 }
 ```
 
-The MCP server proxies all tool calls to the bridge server over HTTP.
-
 ### Environment Variables
 
-| Variable                    | Default                 | Description                              |
-| --------------------------- | ----------------------- | ---------------------------------------- |
-| `HTTP_PORT`                 | `8898`                  | HTTP API port                            |
-| `WS_PORT`                   | `8899`                  | WebSocket port (extension connects here) |
-| `API_KEY`                   | `B3C65095-...`          | Auth key for HTTP API                    |
-| `CHROME_CONTROLLER_URL`     | `http://127.0.0.1:8898` | Pi extension: relay base URL             |
-| `CHROME_CONTROLLER_API_KEY` | _(same as API_KEY)_     | Pi extension: auth key                   |
+| Variable                    | Default                 | Description                     |
+| --------------------------- | ----------------------- | ------------------------------- |
+| `HTTP_PORT`                 | `8898`                  | HTTP API port                   |
+| `WS_PORT`                   | `8899`                  | WebSocket port                  |
+| `API_KEY`                   | `B3C65095-...`          | Auth key                        |
+| `CHROME_CONTROLLER_URL`     | `http://127.0.0.1:8898` | Pi extension: relay base URL    |
+| `CHROME_CONTROLLER_API_KEY` | _(same as API_KEY)_     | Pi extension: auth key          |
 
 ## Workflow
 
-1. **Pre-flight:** Run `npm start` in the chrome-controller repo if you haven't already. Then call `chrome_controller_health` to confirm the server and extension are connected.
-2. Call `chrome_query_tabs` to find a `tabId`, or `chrome_create_tab` to open a controlled tab.
-3. Call `chrome_select_tab` when an existing tab should be visually marked as controlled.
-4. Controlled tabs are placed into the visible Chrome tab group **AI Tool** and get a robot title marker while actively controlled.
-5. Use `chrome_mouse` for real viewport mouse actions. It auto-visualizes move, press, release, and click on the page.
-6. Use `chrome_type_text` only after the target input/editor is focused. It types characters one by one with visible feedback and optional typing sound.
-7. Use `chrome_screenshot` to capture a tab screenshot. Returns a file path in `/tmp/`. Use the `read` tool on the returned `path` value to inspect it.
-8. Use `chrome_capture_video` to record a short sequence of screenshots (video capture). Specify `fps`, `duration`, `format`, and `quality`.
-9. Use `chrome_evaluate` to run arbitrary JavaScript in the page context.
-10. Use `chrome_extract_content` to extract structured page text (headings, paragraphs, links, tables) without writing custom JS.
-11. Use `chrome_extract_regions` to find repeated content blocks (job listings, search results, product cards).
-12. Use `chrome_console_logs` to collect console output (log, warn, error) from a page.
-13. Use `chrome_release_tab` when control is finished but the tab should remain open.
-14. Use `chrome_cleanup_ai_tabs` to release active markers, or with `closeTabs: true` only when the user explicitly wants to close managed tabs.
-15. Use `chrome_batch` for multiple independent actions in parallel; use `mode: "sequential"` for ordered flows. Each action in the `actions` array must have an `action` field with the server-side action name (see table below).
+1. **Pre-flight:** Run `npm start`, then `chrome_controller_health` to confirm connection.
+2. **Find or create a tab:** `chrome_query_tabs` or `chrome_create_tab`.
+3. **Select a tab:** `chrome_select_tab` to mark an existing tab as controlled.
+4. Controlled tabs go into the **AI Tool** Chrome tab group and get a `🤖 ` title prefix.
+5. **Mouse:** `chrome_mouse` for viewport mouse actions (auto-visualized).
+6. **Text:** `chrome_type_text` after the target input is focused. Uses `typingDelayMs: 55-100` for demos.
+7. **Screenshot:** `chrome_screenshot` returns a `/tmp/` path; use `read` to inspect.
+8. **Video:** `chrome_capture_video` with `fps`, `duration`, `format`, `quality`.
+9. **JavaScript:** `chrome_evaluate` to run arbitrary JS in the page context.
+10. **Content extraction:** `chrome_extract_content` for structured text; `chrome_extract_regions` for repeated blocks (listings, results, cards).
+11. **Console logs:** `chrome_console_logs` for `log`, `warn`, `error` output.
+12. **Release control:** `chrome_release_tab` when done (keeps tab open).
+13. **Cleanup:** `chrome_cleanup_ai_tabs` to release markers; add `closeTabs: true` only when explicitly requested.
+14. **Batch:** `chrome_batch` with `mode: "parallel"` (default) or `mode: "sequential"`. Each action needs an `action` field (see table below).
 
 ## Batch Action Names
 
-Use these action names in `chrome_batch` `actions` arrays:
-
-| Action               | Key Params                                             | Notes                                        |
-| -------------------- | ------------------------------------------------------ | -------------------------------------------- |
-| `createTab`          | `url`, `active`                                        | Creates and selects tab                      |
-| `queryTabs`          | `queryInfo`                                            | Query tabs (same as `chrome.tabs.query`)     |
-| `selectTab`          | `tabId`, `activate`                                    | Mark tab as controlled                       |
-| `releaseTab`         | `tabId`, `reason`                                      | Release control, keep tab open               |
-| `captureScreenshot`  | `tabId`, `screenshotOptions`                           | PNG/JPEG/WebP screenshot via CDP             |
-| `captureVideo`       | `tabId`, `fps`, `duration`, `format`, `quality`        | Sequence of CDP screenshots at specified FPS |
-| `evaluateOnPage`     | `tabId`, `expression`, `returnByValue`, `awaitPromise` | `Runtime.evaluate` via CDP                   |
-| `getConsoleLogs`     | `tabId`, `timeoutMs`                                   | Collect `Runtime.consoleAPICalled` events    |
-| `sendCommand`        | `tabId`, `method`, `commandParams`                     | Raw CDP command                              |
-| `ensureDebugger`     | `tabId`                                                | Attach debugger (idempotent)                 |
-| `visualizeAction`    | `tabId`, `type`, `x`, `y`, `detail`                    | Trigger HUD overlay effect                   |
-| `cleanupManagedTabs` | `closeTabs`                                            | Release or close AI-managed tabs             |
-| `batch`              | `actions`, `mode`                                      | Nested batch                                 |
-
-Example:
+| Action               | Key Params                              | Notes                                  |
+| -------------------- | --------------------------------------- | -------------------------------------- |
+| `createTab`          | `url`, `active`                         | Creates and selects tab                |
+| `queryTabs`          | `queryInfo`                             | Query tabs                             |
+| `selectTab`          | `tabId`, `activate`                     | Mark tab as controlled                 |
+| `releaseTab`         | `tabId`, `reason`                       | Release control, keep tab open         |
+| `captureScreenshot`  | `tabId`, `screenshotOptions`            | PNG/JPEG/WebP via CDP                  |
+| `captureVideo`       | `tabId`, `fps`, `duration`, `format`    | CDP screenshot sequence                |
+| `evaluateOnPage`     | `tabId`, `expression`, `awaitPromise`   | `Runtime.evaluate` via CDP             |
+| `getConsoleLogs`     | `tabId`, `timeoutMs`                    | Collect `consoleAPICalled` events      |
+| `sendCommand`        | `tabId`, `method`, `commandParams`      | Raw CDP command                        |
+| `ensureDebugger`     | `tabId`                                 | Attach debugger (idempotent)           |
+| `visualizeAction`    | `tabId`, `type`, `x`, `y`, `detail`    | HUD overlay effect                     |
+| `cleanupManagedTabs` | `closeTabs`                             | Release or close AI-managed tabs       |
+| `batch`              | `actions`, `mode`                       | Nested batch                           |
 
 ```json
-{
-  "mode": "parallel",
-  "actions": [
-    { "action": "queryTabs" },
-    { "action": "evaluateOnPage", "tabId": 123, "expression": "1+1" }
-  ]
-}
+{"mode": "parallel", "actions": [{"action": "queryTabs"}, {"action": "evaluateOnPage", "tabId": 123, "expression": "1+1"}]}
 ```
 
 ## Notes
 
 - Coordinates are viewport coordinates in the target tab.
-- Restricted pages such as `chrome://` may not show the visual overlay because content scripts cannot run there.
-- Do not call visual-only actions for normal mouse or typing work; the extension auto-visualizes CDP mouse and text commands.
-- For human-visible demos, prefer `chrome_type_text` with `typingDelayMs` between 55 and 100 so the user can see each character appear.
+- Restricted pages (`chrome://`) may not show the visual overlay.
+- The extension auto-visualizes CDP mouse and text commands; do not call visual-only actions separately.

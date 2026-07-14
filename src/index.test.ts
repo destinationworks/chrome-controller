@@ -219,3 +219,505 @@ test('chrome_batch sends raw actions payload', async () => {
 
   global.fetch = originalFetch;
 });
+
+test('chrome_create_tab sends correct payload', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  let sentPayload: unknown;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return {
+      ok: true,
+      json: async () => ({ success: true, result: { tabId: 42 } }),
+    } as Response;
+  };
+
+  await pi.tools['chrome_create_tab'].execute('call_1', { url: 'https://example.com' }, undefined);
+  const p = sentPayload as { action: string; url: string };
+  assert.equal(p.action, 'createTab');
+  assert.equal(p.url, 'https://example.com');
+
+  global.fetch = originalFetch;
+});
+
+test('chrome_select_tab sends correct payload', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  let sentPayload: unknown;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return {
+      ok: true,
+      json: async () => ({ success: true }),
+    } as Response;
+  };
+
+  await pi.tools['chrome_select_tab'].execute('call_1', { tabId: 99 }, undefined);
+  const p = sentPayload as { action: string; tabId: number };
+  assert.equal(p.action, 'selectTab');
+  assert.equal(p.tabId, 99);
+
+  global.fetch = originalFetch;
+});
+
+test('chrome_release_tab sends correct payload', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  let sentPayload: unknown;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return {
+      ok: true,
+      json: async () => ({ success: true }),
+    } as Response;
+  };
+
+  await pi.tools['chrome_release_tab'].execute('call_1', { tabId: 77, reason: 'done' }, undefined);
+  const p = sentPayload as { action: string; tabId: number; reason: string };
+  assert.equal(p.action, 'releaseTab');
+  assert.equal(p.tabId, 77);
+  assert.equal(p.reason, 'done');
+
+  global.fetch = originalFetch;
+});
+
+test('chrome_cleanup_ai_tabs sends correct payload', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  let sentPayload: unknown;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return {
+      ok: true,
+      json: async () => ({ success: true }),
+    } as Response;
+  };
+
+  await pi.tools['chrome_cleanup_ai_tabs'].execute('call_1', { closeTabs: false }, undefined);
+  const p = sentPayload as { action: string; closeTabs: boolean };
+  assert.equal(p.action, 'cleanupManagedTabs');
+  assert.equal(p.closeTabs, false);
+
+  global.fetch = originalFetch;
+});
+
+test('chrome_capture_video sends correct payload', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  let sentPayload: unknown;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return {
+      ok: true,
+      json: async () => ({ success: true, result: { framesDir: '/tmp/frames' } }),
+    } as Response;
+  };
+
+  await pi.tools['chrome_capture_video'].execute('call_1', { tabId: 10 }, undefined);
+  const p = sentPayload as { action: string; fps: number; duration: number; format: string; quality: number };
+  assert.equal(p.action, 'captureVideo');
+  assert.equal(p.fps, 5);
+  assert.equal(p.duration, 3);
+  assert.equal(p.format, 'jpeg');
+  assert.equal(p.quality, 80);
+
+  global.fetch = originalFetch;
+});
+
+test('chrome_type_text sends debugger batch with insertText', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  let sentPayload: unknown;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return {
+      ok: true,
+      json: async () => ({ success: true }),
+    } as Response;
+  };
+
+  await pi.tools['chrome_type_text'].execute('call_1', { tabId: 3, text: 'hello' }, undefined);
+  const p = sentPayload as { mode: string; actions: Array<{ method: string; commandParams: Record<string, unknown> }> };
+  assert.equal(p.mode, 'sequential');
+  assert.equal(p.actions[0].action, 'ensureDebugger');
+  assert.equal(p.actions[1].method, 'Input.insertText');
+  assert.equal(p.actions[1].commandParams.text, 'hello');
+  assert.equal(p.actions[1].commandParams.sound, true);
+
+  global.fetch = originalFetch;
+});
+
+test('chrome_type_text with instant mode disables animation', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  let sentPayload: unknown;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return {
+      ok: true,
+      json: async () => ({ success: true }),
+    } as Response;
+  };
+
+  await pi.tools['chrome_type_text'].execute('call_1', { tabId: 3, text: 'hello', instant: true }, undefined);
+  const p = sentPayload as { actions: Array<{ commandParams: Record<string, unknown> }> };
+  assert.equal(p.actions[1].commandParams.animateTyping, false);
+
+  global.fetch = originalFetch;
+});
+
+test('chrome_extract_content sends evaluateOnPage', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  let sentPayload: unknown;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return {
+      ok: true,
+      json: async () => ({ success: true, result: { headings: [], sections: [], links: [], tables: [] } }),
+    } as Response;
+  };
+
+  await pi.tools['chrome_extract_content'].execute('call_1', { tabId: 1 }, undefined);
+  const p = sentPayload as { action: string; returnByValue: boolean; expression: string };
+  assert.equal(p.action, 'evaluateOnPage');
+  assert.equal(p.returnByValue, true);
+  assert.ok(p.expression.includes('maxDepth'));
+
+  global.fetch = originalFetch;
+});
+
+test('chrome_extract_regions sends evaluateOnPage', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  let sentPayload: unknown;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return {
+      ok: true,
+      json: async () => ({ success: true, result: [] }),
+    } as Response;
+  };
+
+  await pi.tools['chrome_extract_regions'].execute('call_1', { tabId: 1, minTextLength: 50 }, undefined);
+  const p = sentPayload as { action: string; expression: string };
+  assert.equal(p.action, 'evaluateOnPage');
+  assert.ok(p.expression.includes('50'));
+
+  global.fetch = originalFetch;
+});
+
+test('chrome_console_logs sends getConsoleLogs', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  let sentPayload: unknown;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return {
+      ok: true,
+      json: async () => ({ success: true, result: [] }),
+    } as Response;
+  };
+
+  await pi.tools['chrome_console_logs'].execute('call_1', { tabId: 1, timeoutMs: 3000 }, undefined);
+  const p = sentPayload as { action: string; timeoutMs: number; requestTimeoutMs: number };
+  assert.equal(p.action, 'getConsoleLogs');
+  assert.equal(p.timeoutMs, 3000);
+  assert.equal(p.requestTimeoutMs, 8000);
+
+  global.fetch = originalFetch;
+});
+
+test('chrome_evaluate with returnByValue false', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  let sentPayload: unknown;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return {
+      ok: true,
+      json: async () => ({ success: true, result: { result: { value: 42 } } }),
+    } as Response;
+  };
+
+  await pi.tools['chrome_evaluate'].execute('call_1', { tabId: 1, expression: 'x', returnByValue: false }, undefined);
+  const p = sentPayload as { returnByValue: boolean; awaitPromise: boolean };
+  assert.equal(p.returnByValue, false);
+
+  global.fetch = originalFetch;
+});
+
+test('chrome_evaluate with awaitPromise false', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  let sentPayload: unknown;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return {
+      ok: true,
+      json: async () => ({ success: true, result: { result: { value: 42 } } }),
+    } as Response;
+  };
+
+  await pi.tools['chrome_evaluate'].execute('call_1', { tabId: 1, expression: 'x', awaitPromise: false }, undefined);
+  const p = sentPayload as { returnByValue: boolean; awaitPromise: boolean };
+  assert.equal(p.awaitPromise, false);
+
+  global.fetch = originalFetch;
+});
+
+test('chrome_mouse move type sends single action', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  let sentPayload: unknown;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return {
+      ok: true,
+      json: async () => ({ success: true }),
+    } as Response;
+  };
+
+  await pi.tools['chrome_mouse'].execute('call_1', { tabId: 1, type: 'move', x: 0, y: 0 }, undefined);
+  const p = sentPayload as { actions: Array<{ action?: string; method?: string; commandParams: Record<string, unknown> }> };
+  assert.equal(p.actions.length, 2); // ensureDebugger + move
+  assert.equal(p.actions[1].method, 'Input.dispatchMouseEvent');
+  assert.equal(p.actions[1].commandParams.type, 'mouseMoved');
+  assert.equal(p.actions[1].commandParams.button, 'none');
+
+  global.fetch = originalFetch;
+});
+
+test('chrome_mouse press type sends single action', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  let sentPayload: unknown;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return {
+      ok: true,
+      json: async () => ({ success: true }),
+    } as Response;
+  };
+
+  await pi.tools['chrome_mouse'].execute('call_1', { tabId: 1, type: 'press', x: 10, y: 20 }, undefined);
+  const p = sentPayload as { actions: Array<{ action?: string; method?: string; commandParams: Record<string, unknown> }> };
+  assert.equal(p.actions.length, 2); // ensureDebugger + press
+  assert.equal(p.actions[1].method, 'Input.dispatchMouseEvent');
+  assert.equal(p.actions[1].commandParams.type, 'mousePressed');
+  assert.equal(p.actions[1].commandParams.button, 'left');
+
+  global.fetch = originalFetch;
+});
+
+test('chrome_mouse release type sends single action', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  let sentPayload: unknown;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return {
+      ok: true,
+      json: async () => ({ success: true }),
+    } as Response;
+  };
+
+  await pi.tools['chrome_mouse'].execute('call_1', { tabId: 1, type: 'release', x: 10, y: 20 }, undefined);
+  const p = sentPayload as { actions: Array<{ action?: string; method?: string; commandParams: Record<string, unknown> }> };
+  assert.equal(p.actions.length, 2); // ensureDebugger + release
+  assert.equal(p.actions[1].method, 'Input.dispatchMouseEvent');
+  assert.equal(p.actions[1].commandParams.type, 'mouseReleased');
+  assert.equal(p.actions[1].commandParams.button, 'left');
+
+  global.fetch = originalFetch;
+});
+
+test('chrome_screenshot with jpeg format and quality', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  const restore = mockFetch({ data: Buffer.from('img').toString('base64'), format: 'jpeg' });
+
+  try {
+    const result = await pi.tools['chrome_screenshot'].execute('call_1', { tabId: 1, format: 'jpeg', quality: 85 }, undefined) as { content: Array<{ text: string }> };
+    const parsed = JSON.parse(result.content[0].text) as { path: string };
+    assert.ok(parsed.path.endsWith('.jpg'));
+  } finally {
+    restore();
+  }
+});
+
+test('chrome_screenshot with webp format', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  const restore = mockFetch({ data: Buffer.from('img').toString('base64'), format: 'webp' });
+
+  try {
+    const result = await pi.tools['chrome_screenshot'].execute('call_1', { tabId: 1, format: 'webp' }, undefined) as { content: Array<{ text: string }> };
+    const parsed = JSON.parse(result.content[0].text) as { path: string };
+    assert.ok(parsed.path.endsWith('.webp'));
+  } finally {
+    restore();
+  }
+});
+
+test('chrome_request throws error on HTTP failure', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({
+    ok: false,
+    status: 503,
+    json: async () => ({ error: 'Extension not connected' }),
+  } as Response);
+
+  try {
+    await assert.rejects(
+      () => pi.tools['chrome_controller_health'].execute('call_1', {}, undefined),
+      /Extension not connected/
+    );
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('chrome_capture_video with custom params', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  let sentPayload: unknown;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return {
+      ok: true,
+      json: async () => ({ success: true, result: { framesDir: '/tmp/frames' } }),
+    } as Response;
+  };
+
+  await pi.tools['chrome_capture_video'].execute('call_1', { tabId: 10, fps: 10, duration: 5, format: 'png', quality: 95 }, undefined);
+  const p = sentPayload as { fps: number; duration: number; format: string; quality: number };
+  assert.equal(p.fps, 10);
+  assert.equal(p.duration, 5);
+  assert.equal(p.format, 'png');
+  assert.equal(p.quality, 95);
+
+  global.fetch = originalFetch;
+});
+
+test('chrome_batch with sequential mode', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  let sentPayload: unknown;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return {
+      ok: true,
+      json: async () => ({ success: true }),
+    } as Response;
+  };
+
+  await pi.tools['chrome_batch'].execute('call_1', { mode: 'sequential', actions: [{ action: 'queryTabs' }] }, undefined);
+  const p = sentPayload as { mode: string; stopOnError: unknown };
+  assert.equal(p.mode, 'sequential');
+
+  global.fetch = originalFetch;
+});
+
+test('chrome_mouse click with right button', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  let sentPayload: unknown;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return {
+      ok: true,
+      json: async () => ({ success: true }),
+    } as Response;
+  };
+
+  await pi.tools['chrome_mouse'].execute('call_1', { tabId: 1, type: 'click', x: 50, y: 50, button: 'right' }, undefined);
+  const p = sentPayload as { actions: Array<{ commandParams: Record<string, unknown>; events?: Array<{ type: string }> }> };
+  assert.equal(p.actions[0].action, 'ensureDebugger');
+  // click expands to: ensureDebugger + mouseMoved + mousePressed + mouseReleased
+  assert.ok(p.actions.length >= 3);
+  // Last action should be mouseReleased with the button
+  const lastAction = p.actions[p.actions.length - 1];
+  assert.equal(lastAction.commandParams.type, 'mouseReleased');
+  assert.equal(lastAction.commandParams.button, 'right');
+
+  global.fetch = originalFetch;
+});
+
+test('chrome_screenshot with nested data format', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  const restore = mockFetch({ data: { data: Buffer.from('nested').toString('base64') }, format: 'webp' });
+
+  try {
+    const result = await pi.tools['chrome_screenshot'].execute('call_1', { tabId: 1, format: 'webp' }, undefined) as { content: Array<{ text: string }> };
+    const parsed = JSON.parse(result.content[0].text) as { path: string };
+    assert.ok(parsed.path.endsWith('.webp'));
+  } finally {
+    restore();
+  }
+});
+
+test('chrome_console_logs uses default timeout', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  let sentPayload: unknown;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return {
+      ok: true,
+      json: async () => ({ success: true, result: [] }),
+    } as Response;
+  };
+
+  await pi.tools['chrome_console_logs'].execute('call_1', { tabId: 1 }, undefined);
+  const p = sentPayload as { timeoutMs: number; requestTimeoutMs: number };
+  assert.equal(p.timeoutMs, 2000);
+  assert.equal(p.requestTimeoutMs, 7000);
+
+  global.fetch = originalFetch;
+});

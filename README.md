@@ -1,6 +1,6 @@
 # Chrome Controller
 
-A local Chrome control bridge for AI agents, with:
+A local Chrome control bridge for AI agents.
 
 - **`Chrome Extension/`** — MV3 Chrome extension (WebSocket client + CDP overlay HUD)
 - **`src/server.ts`** — WebSocket/HTTP relay server (compiled to `dist/server.js`)
@@ -9,25 +9,14 @@ A local Chrome control bridge for AI agents, with:
 
 ## Quick Start
 
-### 1. Install dependencies
+1. **Install:** `npm install`
+2. **Start the relay server:** `npm start`
 
-```bash
-npm install
-```
+   This single command handles everything: kills stale servers, rebuilds if source changed, starts the server, and verifies it's healthy. HTTP API on `http://127.0.0.1:8898`, WebSocket on `ws://127.0.0.1:8899`.
 
-### 2. Start the relay server (automated)
+3. **Load the Chrome extension:** Open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, select `Chrome Extension/`.
 
-```bash
-npm start
-```
-
-This single command handles everything: kills stale servers, rebuilds if source changed, starts the server, and waits until it's healthy. The HTTP API listens on `http://127.0.0.1:8898` and the WebSocket on `ws://127.0.0.1:8899` by default.
-
-### 3. Load the Chrome extension
-
-Open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select the `Chrome Extension/` folder.
-
-Once connected, you'll see `Chrome extension connected!` in the server terminal.
+   You'll see `Chrome extension connected!` in the server terminal.
 
 ## Environment Variables
 
@@ -70,9 +59,9 @@ Add to your Antigravity / Claude Desktop config:
 }
 ```
 
-> **Note:** The relay server (`npm start`) must be running separately. The MCP server only proxies tool calls to it.
+> The relay server (`npm start`) must be running separately. The MCP server only proxies tool calls to it.
 
-## Usage Examples
+## Usage
 
 ### Health Check
 
@@ -80,16 +69,7 @@ Add to your Antigravity / Claude Desktop config:
 curl http://127.0.0.1:8898/health
 ```
 
-### Single Action
-
-```bash
-curl -X POST http://127.0.0.1:8898 \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: B3C65095-74E1-4F48-9EBB-64F5DD6AB078" \
-  -d '{"action":"queryTabs"}'
-```
-
-### Batch Actions (parallel)
+### Batch Actions
 
 ```bash
 curl -X POST http://127.0.0.1:8898 \
@@ -98,23 +78,16 @@ curl -X POST http://127.0.0.1:8898 \
   -d '{"mode":"parallel","actions":[{"action":"queryTabs"},{"action":"createTab","url":"https://example.com"}]}'
 ```
 
-### Sequential mouse click via CDP
+For raw CDP commands (e.g. mouse click), use `ensureDebugger` followed by `sendCommand`:
 
 ```bash
 curl -X POST http://127.0.0.1:8898 \
   -H "Content-Type: application/json" \
   -H "x-api-key: B3C65095-74E1-4F48-9EBB-64F5DD6AB078" \
-  -d '{
-    "mode": "sequential",
-    "actions": [
-      {"action": "ensureDebugger", "tabId": 123},
-      {"action": "sendCommand", "tabId": 123, "method": "Input.dispatchMouseEvent",
-       "commandParams": {"type": "mousePressed", "x": 200, "y": 160, "button": "left", "clickCount": 1}}
-    ]
-  }'
+  -d '{"mode":"sequential","actions":[{"action":"ensureDebugger","tabId":123},{"action":"sendCommand","tabId":123,"method":"Input.dispatchMouseEvent","commandParams":{"type":"mousePressed","x":200,"y":160,"button":"left","clickCount":1}}]}'
 ```
 
-## Running Tests
+## Tests
 
 ```bash
 npm test
@@ -129,17 +102,11 @@ Every controlled tab is moved into a visible Chrome tab group named **AI Tool**.
 Release markers but keep managed tabs open:
 
 ```bash
-curl -X POST http://127.0.0.1:8898 \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: B3C65095-74E1-4F48-9EBB-64F5DD6AB078" \
-  -d '{"action":"cleanupManagedTabs"}'
+curl -X POST http://127.0.0.1:8898 -H "Content-Type: application/json" -H "x-api-key: B3C65095-74E1-4F48-9EBB-64F5DD6AB078" -d '{"action":"cleanupManagedTabs"}'
 ```
 
 Close all tabs in the AI Tool group:
 
 ```bash
-curl -X POST http://127.0.0.1:8898 \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: B3C65095-74E1-4F48-9EBB-64F5DD6AB078" \
-  -d '{"action":"cleanupManagedTabs","closeTabs":true}'
+curl -X POST http://127.0.0.1:8898 -H "Content-Type: application/json" -H "x-api-key: B3C65095-74E1-4F48-9EBB-64F5DD6AB078" -d '{"action":"cleanupManagedTabs","closeTabs":true}'
 ```

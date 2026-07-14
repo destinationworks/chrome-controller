@@ -13,6 +13,7 @@ cd /Users/dst/dev/chrome-controller && npm start
 This single command handles everything: kills stale servers, rebuilds if source changed, starts the server, and verifies it's healthy. The extension in Chrome must also be loaded (`Chrome Extension/` as unpacked MV3).
 
 Verify with:
+
 ```bash
 curl -s http://127.0.0.1:8898/health
 ```
@@ -26,6 +27,7 @@ While actively working, reread `user-updates.md` for new instructions at least o
 ## Refactoring Guidelines (LSP/MCP)
 
 Before executing any semantic refactoring (TypeScript/JavaScript, HTML, Rust), the agent must:
+
 1. Run diagnostics for the target file/project to verify baseline state.
 2. Use symbol tools (`definition`, `references`, `hover`, `workspace symbols`) to explore impact.
 3. Prefer LSP rename/code-action tools over manual text/regex edits wherever possible.

@@ -17,7 +17,7 @@ const DISCOVERY_DIR = path.join(os.homedir(), '.chrome-controller');
 const DEFAULT_API_KEY = 'B3C65095-74E1-4F48-9EBB-64F5DD6AB078';
 const DEFAULT_HTTP_PORT = 8898;
 
-function readDiscovery(instance: string): { httpPort: number; apiKey: string } | null {
+export function readDiscovery(instance: string): { httpPort: number; apiKey: string } | null {
   try {
     const data = JSON.parse(
       fs.readFileSync(path.join(DISCOVERY_DIR, `${instance}.json`), 'utf8')
@@ -28,7 +28,7 @@ function readDiscovery(instance: string): { httpPort: number; apiKey: string } |
   }
 }
 
-function getConfig(): { httpPort: number; apiKey: string } {
+export function getConfig(): { httpPort: number; apiKey: string } {
   // Explicit env vars always win
   if (process.env.HTTP_PORT || process.env.API_KEY) {
     return {
@@ -44,7 +44,7 @@ function getConfig(): { httpPort: number; apiKey: string } {
   return { httpPort: DEFAULT_HTTP_PORT, apiKey: DEFAULT_API_KEY };
 }
 
-function sendCommand(action: string, params: Record<string, unknown> = {}): Promise<unknown> {
+export function sendCommand(action: string, params: Record<string, unknown> = {}): Promise<unknown> {
   const { httpPort: HTTP_PORT, apiKey: API_KEY } = getConfig();
   return new Promise((resolve, reject) => {
     const data = JSON.stringify({ ...params, action });
@@ -454,7 +454,20 @@ async function main(): Promise<void> {
   await server.connect(transport);
 }
 
-main().catch((error: Error) => {
-  console.error('Fatal error in MCP server:', error);
-  process.exit(1);
-});
+if (typeof require !== 'undefined' && require.main === module) {
+  main().catch((error: Error) => {
+    console.error('Fatal error in MCP server:', error);
+    process.exit(1);
+  });
+} else if (import.meta.url.endsWith('/mcp.js') || import.meta.url.endsWith('/mcp.ts')) {
+  // Only run when executed directly, not when imported for testing
+  const isMainModule = process.argv[1]?.replace(/\.js$/, '.ts') === import.meta.url.replace(/\.js$/, '.ts')
+    || process.argv[1]?.endsWith('mcp.ts')
+    || process.argv[1]?.endsWith('mcp.js');
+  if (isMainModule) {
+    main().catch((error: Error) => {
+      console.error('Fatal error in MCP server:', error);
+      process.exit(1);
+    });
+  }
+}
