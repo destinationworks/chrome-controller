@@ -9,20 +9,19 @@ A local Chrome control bridge for AI agents, with:
 
 ## Quick Start
 
-### 1. Install dependencies and build
+### 1. Install dependencies
 
 ```bash
-npm install && npm run build
+npm install
 ```
 
-### 2. Start the relay server
+### 2. Start the relay server (automated)
 
 ```bash
 npm start
-# or: node dist/server.js
 ```
 
-The HTTP API listens on `http://127.0.0.1:8898` and the WebSocket on `ws://127.0.0.1:8899` by default.
+This single command handles everything: kills stale servers, rebuilds if source changed, starts the server, and waits until it's healthy. The HTTP API listens on `http://127.0.0.1:8898` and the WebSocket on `ws://127.0.0.1:8899` by default.
 
 ### 3. Load the Chrome extension
 
@@ -32,13 +31,13 @@ Once connected, you'll see `Chrome extension connected!` in the server terminal.
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|---|---|---|
-| `HTTP_PORT` | `8898` | HTTP API port |
-| `WS_PORT` | `8899` | WebSocket port |
-| `API_KEY` | `B3C65095-74E1-4F48-9EBB-64F5DD6AB078` | Auth key |
-| `REQUEST_TIMEOUT_MS` | `10000` | Per-command timeout |
-| `MAX_BATCH_ACTIONS` | `50` | Max actions per batch request |
+| Variable             | Default                                | Description                   |
+| -------------------- | -------------------------------------- | ----------------------------- |
+| `HTTP_PORT`          | `8898`                                 | HTTP API port                 |
+| `WS_PORT`            | `8899`                                 | WebSocket port                |
+| `API_KEY`            | `B3C65095-74E1-4F48-9EBB-64F5DD6AB078` | Auth key                      |
+| `REQUEST_TIMEOUT_MS` | `10000`                                | Per-command timeout           |
+| `MAX_BATCH_ACTIONS`  | `50`                                   | Max actions per batch request |
 
 ## Pi Extension Setup
 

@@ -12,11 +12,10 @@ Use this skill when the user asks you to control Chrome, inspect browser tabs, c
 Chrome Controller has three parts that must all be running:
 
 1. **Chrome Extension** — load the `Chrome Extension/` folder as an unpacked MV3 extension in Chrome.
-2. **Bridge Server** — the local WebSocket/HTTP relay:
+2. **Bridge Server** — one-command automated startup:
    ```bash
    cd /path/to/chrome-controller
-   npm install && npm run build
-   npm start   # or: node dist/server.js
+   npm start   # kills stale server, rebuilds if needed, starts & verifies healthy
    ```
 3. **Pi/Antigravity Extension** — registered automatically via `settings.json` (see Install section).
 
@@ -25,6 +24,7 @@ Chrome Controller has three parts that must all be running:
 ### Pi
 
 Add the repo path to `~/.pi/agent/settings.json`:
+
 ```json
 {
   "packages": ["/path/to/chrome-controller"]
@@ -36,6 +36,7 @@ Then restart Pi. The `chrome-controller` skill and all `chrome_*` tools load aut
 ### Antigravity (MCP)
 
 Add to your Antigravity `settings.json` or Claude Desktop config:
+
 ```json
 {
   "mcpServers": {
@@ -55,17 +56,17 @@ The MCP server proxies all tool calls to the bridge server over HTTP.
 
 ### Environment Variables
 
-| Variable | Default | Description |
-|---|---|---|
-| `HTTP_PORT` | `8898` | HTTP API port |
-| `WS_PORT` | `8899` | WebSocket port (extension connects here) |
-| `API_KEY` | `B3C65095-...` | Auth key for HTTP API |
-| `CHROME_CONTROLLER_URL` | `http://127.0.0.1:8898` | Pi extension: relay base URL |
-| `CHROME_CONTROLLER_API_KEY` | *(same as API_KEY)* | Pi extension: auth key |
+| Variable                    | Default                 | Description                              |
+| --------------------------- | ----------------------- | ---------------------------------------- |
+| `HTTP_PORT`                 | `8898`                  | HTTP API port                            |
+| `WS_PORT`                   | `8899`                  | WebSocket port (extension connects here) |
+| `API_KEY`                   | `B3C65095-...`          | Auth key for HTTP API                    |
+| `CHROME_CONTROLLER_URL`     | `http://127.0.0.1:8898` | Pi extension: relay base URL             |
+| `CHROME_CONTROLLER_API_KEY` | _(same as API_KEY)_     | Pi extension: auth key                   |
 
 ## Workflow
 
-1. Call `chrome_controller_health` first if connection state is unknown.
+1. **Pre-flight:** Run `npm start` in the chrome-controller repo if you haven't already. Then call `chrome_controller_health` to confirm the server and extension are connected.
 2. Call `chrome_query_tabs` to find a `tabId`, or `chrome_create_tab` to open a controlled tab.
 3. Call `chrome_select_tab` when an existing tab should be visually marked as controlled.
 4. Controlled tabs are placed into the visible Chrome tab group **AI Tool** and get a robot title marker while actively controlled.
@@ -85,29 +86,30 @@ The MCP server proxies all tool calls to the bridge server over HTTP.
 
 Use these action names in `chrome_batch` `actions` arrays:
 
-| Action | Key Params | Notes |
-|---|---|---|
-| `createTab` | `url`, `active` | Creates and selects tab |
-| `queryTabs` | `queryInfo` | Query tabs (same as `chrome.tabs.query`) |
-| `selectTab` | `tabId`, `activate` | Mark tab as controlled |
-| `releaseTab` | `tabId`, `reason` | Release control, keep tab open |
-| `captureScreenshot` | `tabId`, `screenshotOptions` | PNG/JPEG/WebP screenshot via CDP |
-| `captureVideo` | `tabId`, `fps`, `duration`, `format`, `quality` | Sequence of CDP screenshots at specified FPS |
-| `evaluateOnPage` | `tabId`, `expression`, `returnByValue`, `awaitPromise` | `Runtime.evaluate` via CDP |
-| `getConsoleLogs` | `tabId`, `timeoutMs` | Collect `Runtime.consoleAPICalled` events |
-| `sendCommand` | `tabId`, `method`, `commandParams` | Raw CDP command |
-| `ensureDebugger` | `tabId` | Attach debugger (idempotent) |
-| `visualizeAction` | `tabId`, `type`, `x`, `y`, `detail` | Trigger HUD overlay effect |
-| `cleanupManagedTabs` | `closeTabs` | Release or close AI-managed tabs |
-| `batch` | `actions`, `mode` | Nested batch |
+| Action               | Key Params                                             | Notes                                        |
+| -------------------- | ------------------------------------------------------ | -------------------------------------------- |
+| `createTab`          | `url`, `active`                                        | Creates and selects tab                      |
+| `queryTabs`          | `queryInfo`                                            | Query tabs (same as `chrome.tabs.query`)     |
+| `selectTab`          | `tabId`, `activate`                                    | Mark tab as controlled                       |
+| `releaseTab`         | `tabId`, `reason`                                      | Release control, keep tab open               |
+| `captureScreenshot`  | `tabId`, `screenshotOptions`                           | PNG/JPEG/WebP screenshot via CDP             |
+| `captureVideo`       | `tabId`, `fps`, `duration`, `format`, `quality`        | Sequence of CDP screenshots at specified FPS |
+| `evaluateOnPage`     | `tabId`, `expression`, `returnByValue`, `awaitPromise` | `Runtime.evaluate` via CDP                   |
+| `getConsoleLogs`     | `tabId`, `timeoutMs`                                   | Collect `Runtime.consoleAPICalled` events    |
+| `sendCommand`        | `tabId`, `method`, `commandParams`                     | Raw CDP command                              |
+| `ensureDebugger`     | `tabId`                                                | Attach debugger (idempotent)                 |
+| `visualizeAction`    | `tabId`, `type`, `x`, `y`, `detail`                    | Trigger HUD overlay effect                   |
+| `cleanupManagedTabs` | `closeTabs`                                            | Release or close AI-managed tabs             |
+| `batch`              | `actions`, `mode`                                      | Nested batch                                 |
 
 Example:
+
 ```json
 {
   "mode": "parallel",
   "actions": [
-    {"action": "queryTabs"},
-    {"action": "evaluateOnPage", "tabId": 123, "expression": "1+1"}
+    { "action": "queryTabs" },
+    { "action": "evaluateOnPage", "tabId": 123, "expression": "1+1" }
   ]
 }
 ```

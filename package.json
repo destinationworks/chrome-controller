@@ -6,9 +6,10 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/server.js",
+    "start": "node scripts/start.mjs",
+    "start:fresh": "node scripts/start.mjs",
     "mcp": "node dist/mcp.js",
-    "test": "npx tsx --test src/server.test.ts src/index.test.ts",
+    "test": "npx tsx --test src/server.test.ts src/index.test.ts src/mcp.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src test --max-warnings 0"
   },
