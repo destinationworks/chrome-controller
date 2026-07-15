@@ -20,7 +20,7 @@ Use this skill when the user asks you to control Chrome, inspect browser tabs, c
 Add to `~/.pi/agent/settings.json`:
 
 ```json
-{"packages": ["/path/to/chrome-controller"]}
+{ "packages": ["/path/to/chrome-controller"] }
 ```
 
 Restart Pi. The `chrome-controller` skill and all `chrome_*` tools load automatically.
@@ -35,7 +35,7 @@ Add to `settings.json` or Claude Desktop config:
     "chrome-controller": {
       "command": "node",
       "args": ["/path/to/chrome-controller/dist/mcp.js"],
-      "env": {"HTTP_PORT": "8898", "API_KEY": "B3C65095-..."}
+      "env": { "HTTP_PORT": "8898", "API_KEY": "B3C65095-..." }
     }
   }
 }
@@ -43,13 +43,13 @@ Add to `settings.json` or Claude Desktop config:
 
 ### Environment Variables
 
-| Variable                    | Default                 | Description                     |
-| --------------------------- | ----------------------- | ------------------------------- |
-| `HTTP_PORT`                 | `8898`                  | HTTP API port                   |
-| `WS_PORT`                   | `8899`                  | WebSocket port                  |
-| `API_KEY`                   | `B3C65095-...`          | Auth key                        |
-| `CHROME_CONTROLLER_URL`     | `http://127.0.0.1:8898` | Pi extension: relay base URL    |
-| `CHROME_CONTROLLER_API_KEY` | _(same as API_KEY)_     | Pi extension: auth key          |
+| Variable                    | Default                 | Description                  |
+| --------------------------- | ----------------------- | ---------------------------- |
+| `HTTP_PORT`                 | `8898`                  | HTTP API port                |
+| `WS_PORT`                   | `8899`                  | WebSocket port               |
+| `API_KEY`                   | `B3C65095-...`          | Auth key                     |
+| `CHROME_CONTROLLER_URL`     | `http://127.0.0.1:8898` | Pi extension: relay base URL |
+| `CHROME_CONTROLLER_API_KEY` | _(same as API_KEY)_     | Pi extension: auth key       |
 
 ## Workflow
 
@@ -70,24 +70,30 @@ Add to `settings.json` or Claude Desktop config:
 
 ## Batch Action Names
 
-| Action               | Key Params                              | Notes                                  |
-| -------------------- | --------------------------------------- | -------------------------------------- |
-| `createTab`          | `url`, `active`                         | Creates and selects tab                |
-| `queryTabs`          | `queryInfo`                             | Query tabs                             |
-| `selectTab`          | `tabId`, `activate`                     | Mark tab as controlled                 |
-| `releaseTab`         | `tabId`, `reason`                       | Release control, keep tab open         |
-| `captureScreenshot`  | `tabId`, `screenshotOptions`            | PNG/JPEG/WebP via CDP                  |
-| `captureVideo`       | `tabId`, `fps`, `duration`, `format`    | CDP screenshot sequence                |
-| `evaluateOnPage`     | `tabId`, `expression`, `awaitPromise`   | `Runtime.evaluate` via CDP             |
-| `getConsoleLogs`     | `tabId`, `timeoutMs`                    | Collect `consoleAPICalled` events      |
-| `sendCommand`        | `tabId`, `method`, `commandParams`      | Raw CDP command                        |
-| `ensureDebugger`     | `tabId`                                 | Attach debugger (idempotent)           |
-| `visualizeAction`    | `tabId`, `type`, `x`, `y`, `detail`    | HUD overlay effect                     |
-| `cleanupManagedTabs` | `closeTabs`                             | Release or close AI-managed tabs       |
-| `batch`              | `actions`, `mode`                       | Nested batch                           |
+| Action               | Key Params                            | Notes                             |
+| -------------------- | ------------------------------------- | --------------------------------- |
+| `createTab`          | `url`, `active`                       | Creates and selects tab           |
+| `queryTabs`          | `queryInfo`                           | Query tabs                        |
+| `selectTab`          | `tabId`, `activate`                   | Mark tab as controlled            |
+| `releaseTab`         | `tabId`, `reason`                     | Release control, keep tab open    |
+| `captureScreenshot`  | `tabId`, `screenshotOptions`          | PNG/JPEG/WebP via CDP             |
+| `captureVideo`       | `tabId`, `fps`, `duration`, `format`  | CDP screenshot sequence           |
+| `evaluateOnPage`     | `tabId`, `expression`, `awaitPromise` | `Runtime.evaluate` via CDP        |
+| `getConsoleLogs`     | `tabId`, `timeoutMs`                  | Collect `consoleAPICalled` events |
+| `sendCommand`        | `tabId`, `method`, `commandParams`    | Raw CDP command                   |
+| `ensureDebugger`     | `tabId`                               | Attach debugger (idempotent)      |
+| `visualizeAction`    | `tabId`, `type`, `x`, `y`, `detail`   | HUD overlay effect                |
+| `cleanupManagedTabs` | `closeTabs`                           | Release or close AI-managed tabs  |
+| `batch`              | `actions`, `mode`                     | Nested batch                      |
 
 ```json
-{"mode": "parallel", "actions": [{"action": "queryTabs"}, {"action": "evaluateOnPage", "tabId": 123, "expression": "1+1"}]}
+{
+  "mode": "parallel",
+  "actions": [
+    { "action": "queryTabs" },
+    { "action": "evaluateOnPage", "tabId": 123, "expression": "1+1" }
+  ]
+}
 ```
 
 ## Notes
