@@ -1,21 +1,21 @@
 {
   "manifest_version": 3,
-  "name": "Chrome Controller",
-  "version": "1.0",
-  "description": "Allows local control of Chrome via WebSocket.",
+  "name": "p agent extension",
+  "version": "1.1.1",
+  "description": "Local browser control bridge for AI agents via Native Messaging",
+  "author": "dst.works@gmail.com",
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
   "permissions": [
     "tabs",
-    "windows",
-    "scripting",
-    "sessions",
-    "activeTab",
-    "storage",
-    "cookies",
     "debugger",
     "tabGroups",
-    "alarms"
+    "alarms",
+    "nativeMessaging"
   ],
-  "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"
   },

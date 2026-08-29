@@ -2,14 +2,8 @@
  * Pi / Antigravity extension entry point for Chrome Controller.
  *
  * Registers all chrome_* tools with the Pi agent runtime.
- * The tools communicate with the local Chrome Controller relay server
- * (src/server.ts) via its HTTP API on port 8898.
- *
- * Usage (Pi):
- *   pi -e "/path/to/chrome-controller"
- *
- * Usage (Antigravity settings.json):
- *   { "packages": ["/path/to/chrome-controller"] }
+ * Tools communicate via Native Messaging IPC socket (/tmp/chrome-controller.sock)
+ * with fallback to the local HTTP relay server (src/server.ts) on port 8898.
  */
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
@@ -17,10 +11,14 @@ import { Type } from 'typebox';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import net from 'node:net';
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8898';
 const DEFAULT_API_KEY = 'B3C65095-74E1-4F48-9EBB-64F5DD6AB078';
 const DISCOVERY_DIR = path.join(os.homedir(), '.chrome-controller');
+const SOCKET_PATH = process.platform === 'win32'
+  ? '\\\\.\\pipe\\chrome-controller-ipc'
+  : '/tmp/chrome-controller.sock';
 
 function readDiscovery(instance: string): { httpPort: number; apiKey: string } | null {
   try {
@@ -45,6 +43,7 @@ type ChromeResponse = {
   error?: string;
   extensionConnected?: boolean;
   pendingRequests?: number;
+  mode?: string;
 };
 
 function baseUrl(): string {
@@ -70,24 +69,69 @@ function textResult(value: unknown) {
   };
 }
 
-async function chromeRequest(payload: ChromeAction | Record<string, unknown>, signal?: AbortSignal): Promise<ChromeResponse> {
-  const response = await fetch(baseUrl(), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey(),
-    },
-    body: JSON.stringify(payload),
-    signal,
+function sendIpcRequest(payload: Record<string, unknown>, timeoutMs = 10000): Promise<ChromeResponse> {
+  return new Promise((resolve, reject) => {
+    const client = net.connect(SOCKET_PATH, () => {
+      client.write(JSON.stringify(payload) + '\n');
+    });
+
+    let dataStr = '';
+    const timer = setTimeout(() => {
+      client.destroy();
+      reject(new Error('IPC socket request timeout'));
+    }, timeoutMs);
+
+    client.on('data', (chunk) => {
+      dataStr += chunk.toString('utf8');
+      if (dataStr.includes('\n')) {
+        clearTimeout(timer);
+        client.end();
+        try {
+          const parsed = JSON.parse(dataStr.trim()) as ChromeResponse;
+          resolve(parsed);
+        } catch {
+          reject(new Error('Invalid IPC JSON response'));
+        }
+      }
+    });
+
+    client.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
   });
-  const data = (await response.json()) as ChromeResponse;
-  if (!response.ok && !data.success) {
-    throw new Error(data.error ?? `Chrome Controller returned HTTP ${response.status}`);
+}
+
+async function chromeRequest(payload: ChromeAction | Record<string, unknown>, signal?: AbortSignal): Promise<ChromeResponse> {
+  try {
+    return await sendIpcRequest(payload as Record<string, unknown>);
+  } catch {
+    // Fall back to HTTP relay server
+    const response = await fetch(baseUrl(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey(),
+      },
+      body: JSON.stringify(payload),
+      signal,
+    });
+    const data = (await response.json()) as ChromeResponse;
+    if (!response.ok && !data.success) {
+      throw new Error(data.error ?? `Chrome Controller returned HTTP ${response.status}`);
+    }
+    return data;
   }
-  return data;
 }
 
 async function chromeHealth(signal?: AbortSignal): Promise<ChromeResponse> {
+  try {
+    const ipcRes = await sendIpcRequest({ action: 'queryTabs' });
+    if (ipcRes.success) {
+      return { success: true, extensionConnected: true, mode: 'NativeMessagingIPC' };
+    }
+  } catch {}
+
   const response = await fetch(`${baseUrl()}/health`, { signal });
   const data = (await response.json()) as ChromeResponse;
   if (!response.ok) {
@@ -111,8 +155,8 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'chrome_controller_health',
     label: 'Chrome Controller Health',
-    description: 'Check whether the local Chrome Controller server is running and connected to the Chrome extension.',
-    promptSnippet: 'Check the local Chrome Controller bridge and extension connection state.',
+    description: 'Check whether the local Chrome Controller server or Native Messaging IPC is active and connected.',
+    promptSnippet: 'Check the local Chrome Controller bridge state.',
     promptGuidelines: [
       'Use chrome_controller_health before browser-control work when connection state is unknown.',
     ],
@@ -127,10 +171,9 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
     name: 'chrome_query_tabs',
     label: 'Chrome Query Tabs',
     description: 'List Chrome tabs visible to the Chrome Controller extension.',
-    promptSnippet: 'List Chrome tabs through the local Chrome Controller bridge.',
+    promptSnippet: 'List Chrome tabs through Chrome Controller.',
     promptGuidelines: [
       'Use chrome_query_tabs to find the tabId before selecting, clicking, or typing into Chrome.',
-      "By default, returns a short summary of tabs. Request 'full' mode only if you need all metadata.",
     ],
     parameters: Type.Object({
       queryInfo: Type.Optional(Type.Any({ description: 'Chrome tabs.query filter object.' })),
@@ -193,7 +236,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'chrome_release_tab',
     label: 'Chrome Release Tab',
-    description: 'Release the active Chrome Controller marker from a tab while leaving it in the AI Tool tab group.',
+    description: 'Release the active Chrome Controller marker from a tab.',
     promptSnippet: 'Release Chrome Controller control marker from a tab.',
     promptGuidelines: ['Use chrome_release_tab when control is finished but the tab should stay open.'],
     parameters: Type.Object({
@@ -222,15 +265,97 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
     },
   });
 
+  // ── High-Level Click ───────────────────────────────────────────────────────
+  pi.registerTool({
+    name: 'chrome_click',
+    label: 'Chrome Click Element',
+    description: 'Click an element in Chrome by CSS selector or elementId tag.',
+    promptSnippet: 'Click an element in a Chrome tab.',
+    promptGuidelines: ['Use chrome_click to click elements by CSS selector or numerical elementId tag from chrome_snapshot_elements.'],
+    parameters: Type.Object({
+      tabId: Type.Number({ description: 'Chrome tab id.' }),
+      selector: Type.Optional(Type.String({ description: 'CSS selector of the element to click.' })),
+      elementId: Type.Optional(Type.Number({ description: 'Numerical element ID tag from chrome_snapshot_elements.' })),
+    }),
+    async execute(_toolCallId, params, signal) {
+      return textResult(await chromeRequest({ action: 'clickSelector', tabId: params.tabId, selector: params.selector, elementId: params.elementId }, signal));
+    },
+  });
+
+  // ── High-Level Fill ────────────────────────────────────────────────────────
+  pi.registerTool({
+    name: 'chrome_fill',
+    label: 'Chrome Fill Input',
+    description: 'Input text into a field in Chrome by CSS selector or elementId tag.',
+    promptSnippet: 'Fill text into an input or textarea field in a Chrome tab.',
+    promptGuidelines: ['Use chrome_fill to input text into elements by CSS selector or elementId tag from chrome_snapshot_elements.'],
+    parameters: Type.Object({
+      tabId: Type.Number({ description: 'Chrome tab id.' }),
+      selector: Type.Optional(Type.String({ description: 'CSS selector of input or textarea.' })),
+      elementId: Type.Optional(Type.Number({ description: 'Numerical element ID tag from chrome_snapshot_elements.' })),
+      text: Type.String({ description: 'Text content to fill into the input field.' }),
+    }),
+    async execute(_toolCallId, params, signal) {
+      return textResult(await chromeRequest({ action: 'fillSelector', tabId: params.tabId, selector: params.selector, elementId: params.elementId, text: params.text }, signal));
+    },
+  });
+
+  // ── High-Level Select Option ───────────────────────────────────────────────
+  pi.registerTool({
+    name: 'chrome_select_option',
+    label: 'Chrome Select Option',
+    description: 'Select an option in an HTML <select> dropdown by CSS selector or elementId tag.',
+    promptSnippet: 'Select an option in a Chrome dropdown element.',
+    promptGuidelines: ['Use chrome_select_option to choose a value in an HTML select dropdown.'],
+    parameters: Type.Object({
+      tabId: Type.Number({ description: 'Chrome tab id.' }),
+      selector: Type.Optional(Type.String({ description: 'CSS selector of select dropdown.' })),
+      elementId: Type.Optional(Type.Number({ description: 'Numerical element ID tag from chrome_snapshot_elements.' })),
+      value: Type.String({ description: 'Option value to select.' }),
+    }),
+    async execute(_toolCallId, params, signal) {
+      return textResult(await chromeRequest({ action: 'selectOption', tabId: params.tabId, selector: params.selector, elementId: params.elementId, value: params.value }, signal));
+    },
+  });
+
+  // ── Element Snapshotting ───────────────────────────────────────────────────
+  pi.registerTool({
+    name: 'chrome_snapshot_elements',
+    label: 'Chrome Snapshot Elements',
+    description: 'Scan interactive elements on the page, label them with numerical badge tags ([1], [2]...), and return element map.',
+    promptSnippet: 'Snapshot interactive page elements with visual ID tags.',
+    promptGuidelines: ['Use chrome_snapshot_elements before interacting with complex UI pages to easily find element IDs.'],
+    parameters: Type.Object({
+      tabId: Type.Number({ description: 'Chrome tab id.' }),
+      showOverlay: Type.Optional(Type.Boolean({ description: 'Whether to show visual badge overlays on screen. Defaults to true.' })),
+    }),
+    async execute(_toolCallId, params, signal) {
+      return textResult(await chromeRequest({ action: 'snapshotElements', tabId: params.tabId, showOverlay: params.showOverlay }, signal));
+    },
+  });
+
+  // ── Get Page Errors ────────────────────────────────────────────────────────
+  pi.registerTool({
+    name: 'chrome_get_page_errors',
+    label: 'Chrome Get Page Errors',
+    description: 'Retrieve continuous window, console.error, and network errors captured on the page.',
+    promptSnippet: 'Get accumulated JS console and network errors from a Chrome tab page.',
+    promptGuidelines: ['Use chrome_get_page_errors to inspect uncaught exceptions and console.error messages.'],
+    parameters: Type.Object({
+      tabId: Type.Number({ description: 'Chrome tab id.' }),
+    }),
+    async execute(_toolCallId, params, signal) {
+      return textResult(await chromeRequest({ action: 'getPageErrors', tabId: params.tabId }, signal));
+    },
+  });
+
   // ── Mouse ───────────────────────────────────────────────────────────────────
   pi.registerTool({
     name: 'chrome_mouse',
     label: 'Chrome Mouse',
-    description: 'Move, press, release, or click the mouse in a Chrome tab via CDP. The Chrome extension auto-visualizes the action.',
-    promptSnippet: 'Control Chrome mouse movement and clicks with visible page overlay feedback.',
-    promptGuidelines: [
-      'Use chrome_mouse for real mouse move/click actions; do not call a separate visualizer because the extension auto-visualizes CDP mouse events.',
-    ],
+    description: 'Move, press, release, or click the mouse in a Chrome tab via CDP.',
+    promptSnippet: 'Control Chrome mouse movement and clicks.',
+    promptGuidelines: ['Use chrome_mouse for real CDP mouse move/click actions.'],
     parameters: Type.Object({
       tabId: Type.Number({ description: 'Chrome tab id.' }),
       type: Type.Union([
@@ -285,8 +410,8 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'chrome_type_text',
     label: 'Chrome Type Text',
-    description: 'Type text into the focused field in a Chrome tab via CDP. Characters appear one by one with optional typing sound.',
-    promptSnippet: 'Type text into focused Chrome fields with visible character-by-character feedback.',
+    description: 'Type text into the focused field in a Chrome tab via CDP.',
+    promptSnippet: 'Type text into focused Chrome fields.',
     promptGuidelines: ['Use chrome_type_text only after focus is already in the intended input or editor.'],
     parameters: Type.Object({
       tabId: Type.Number({ description: 'Chrome tab id.' }),
@@ -321,11 +446,9 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'chrome_batch',
     label: 'Chrome Batch',
-    description: 'Send multiple Chrome Controller actions in one request, either in parallel or sequential order.',
+    description: 'Send multiple Chrome Controller actions in one request.',
     promptSnippet: 'Batch Chrome Controller actions in parallel or sequential mode.',
-    promptGuidelines: [
-      'Use chrome_batch for independent tab/server actions that can run together; use sequential mode for ordered mouse or text workflows.',
-    ],
+    promptGuidelines: ['Use chrome_batch for independent tab/server actions.'],
     parameters: Type.Object({
       mode: Type.Optional(Type.Union([Type.Literal('parallel'), Type.Literal('sequential')])),
       stopOnError: Type.Optional(Type.Boolean()),
@@ -349,18 +472,15 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'chrome_screenshot',
     label: 'Chrome Screenshot',
-    description: 'Capture a screenshot of a Chrome tab via the Chrome DevTools Protocol. Returns the image path.',
-    promptSnippet: 'Capture a screenshot of a Chrome tab through Chrome Controller.',
-    promptGuidelines: [
-      'Use chrome_screenshot when you need to inspect the visual state of a page.',
-      'The screenshot is saved to /tmp/ and the path is returned.',
-    ],
+    description: 'Capture a screenshot of a Chrome tab via CDP.',
+    promptSnippet: 'Capture a screenshot of a Chrome tab.',
+    promptGuidelines: ['Use chrome_screenshot when you need to inspect the visual state of a page.'],
     parameters: Type.Object({
       tabId: Type.Number({ description: 'Chrome tab id.' }),
       format: Type.Optional(
         Type.Union([Type.Literal('png'), Type.Literal('jpeg'), Type.Literal('webp')])
       ),
-      quality: Type.Optional(Type.Number({ description: 'Compression quality 0-100 (jpeg/webp only). Defaults to 100.' })),
+      quality: Type.Optional(Type.Number({ description: 'Compression quality 0-100.' })),
     }),
     async execute(_toolCallId, params, signal) {
       const format = params.format ?? 'png';
@@ -388,12 +508,9 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'chrome_capture_video',
     label: 'Chrome Capture Video',
-    description: 'Capture a short video (sequence of screenshots) from a Chrome tab. Returns a directory of frames.',
-    promptSnippet: 'Capture a short video sequence from a Chrome tab through Chrome Controller.',
-    promptGuidelines: [
-      'Use chrome_capture_video when you need to record visual changes over time on a page.',
-      'Returns a directory containing sequential frame images.',
-    ],
+    description: 'Capture a short video (sequence of screenshots) from a Chrome tab.',
+    promptSnippet: 'Capture a short video sequence from a Chrome tab.',
+    promptGuidelines: ['Use chrome_capture_video when you need to record visual changes over time.'],
     parameters: Type.Object({
       tabId: Type.Number({ description: 'Chrome tab id.' }),
       fps: Type.Optional(Type.Number({ description: 'Frames per second. Defaults to 5.' })),
@@ -402,19 +519,19 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
       quality: Type.Optional(Type.Number({ description: 'Quality 0-100. Defaults to 80.' })),
     }),
     async execute(_toolCallId, params, signal) {
-      const data = await chromeRequest(
-        {
-          action: 'captureVideo',
-          tabId: params.tabId,
-          fps: params.fps ?? 5,
-          duration: params.duration ?? 3,
-          format: params.format ?? 'jpeg',
-          quality: params.quality ?? 80,
-        },
-        signal
+      return textResult(
+        await chromeRequest(
+          {
+            action: 'captureVideo',
+            tabId: params.tabId,
+            fps: params.fps ?? 5,
+            duration: params.duration ?? 3,
+            format: params.format ?? 'jpeg',
+            quality: params.quality ?? 80,
+          },
+          signal
+        )
       );
-
-      return textResult(data);
     },
   });
 
@@ -422,18 +539,15 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'chrome_evaluate',
     label: 'Chrome Evaluate',
-    description: 'Evaluate JavaScript on a Chrome tab page using the DevTools Protocol Runtime.evaluate.',
-    promptSnippet: 'Evaluate custom JavaScript on a Chrome tab page through Chrome Controller.',
-    promptGuidelines: [
-      'Use chrome_evaluate to run arbitrary JS in the page context and get the result.',
-      'The expression is evaluated directly (not wrapped in a function).',
-    ],
+    description: 'Evaluate JavaScript on a Chrome tab page using DevTools Protocol.',
+    promptSnippet: 'Evaluate custom JavaScript on a Chrome tab page.',
+    promptGuidelines: ['Use chrome_evaluate to run arbitrary JS in the page context.'],
     parameters: Type.Object({
       tabId: Type.Number({ description: 'Chrome tab id.' }),
-      expression: Type.String({ description: 'JavaScript expression to evaluate in the page context.' }),
-      returnByValue: Type.Optional(Type.Boolean({ description: 'Whether to return the result by value instead of by reference. Defaults to true.' })),
-      awaitPromise: Type.Optional(Type.Boolean({ description: 'Whether to await promises returned by the expression. Defaults to true.' })),
-      untruncated: Type.Optional(Type.Boolean({ description: 'Whether to return full string result even if very large. Defaults to false.' })),
+      expression: Type.String({ description: 'JavaScript expression to evaluate.' }),
+      returnByValue: Type.Optional(Type.Boolean({ description: 'Return result by value. Defaults to true.' })),
+      awaitPromise: Type.Optional(Type.Boolean({ description: 'Await promises. Defaults to true.' })),
+      untruncated: Type.Optional(Type.Boolean({ description: 'Return full result without truncation.' })),
     }),
     async execute(_toolCallId, params, signal) {
       const data = await chromeRequest(
@@ -466,20 +580,16 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'chrome_extract_content',
     label: 'Chrome Extract Content',
-    description: 'Extract structured text content from a Chrome tab page (headings, paragraphs, links, tables, lists).',
-    promptSnippet: 'Extract structured page content from a Chrome tab automatically.',
-    promptGuidelines: [
-      'Use chrome_extract_content instead of chrome_evaluate when you need to read page content (headings, body text, links, tables).',
-      'Prefer this over manual DOM queries for general content extraction — it handles SPAs, server-rendered pages, and dynamic content.',
-      'Use maxDepth to limit heading hierarchy (default 3) and maxLength to cap output size.',
-    ],
+    description: 'Extract structured text content from a Chrome tab page.',
+    promptSnippet: 'Extract structured page content from a Chrome tab.',
+    promptGuidelines: ['Use chrome_extract_content when you need to read page text and structure.'],
     parameters: Type.Object({
       tabId: Type.Number({ description: 'Chrome tab id.' }),
-      maxDepth: Type.Optional(Type.Number({ description: 'Maximum heading depth to extract (h1-h6). Defaults to 3.' })),
-      maxLength: Type.Optional(Type.Number({ description: 'Maximum total output length in characters. Defaults to 15000.' })),
-      includeLinks: Type.Optional(Type.Boolean({ description: 'Whether to include extracted links. Defaults to true.' })),
-      includeTables: Type.Optional(Type.Boolean({ description: 'Whether to include table data. Defaults to true.' })),
-      untruncated: Type.Optional(Type.Boolean({ description: 'Whether to return full result even if very large. Defaults to false.' })),
+      maxDepth: Type.Optional(Type.Number({ description: 'Max heading depth h1-h6. Defaults to 3.' })),
+      maxLength: Type.Optional(Type.Number({ description: 'Max total output length. Defaults to 15000.' })),
+      includeLinks: Type.Optional(Type.Boolean({ description: 'Include extracted links. Defaults to true.' })),
+      includeTables: Type.Optional(Type.Boolean({ description: 'Include table data. Defaults to true.' })),
+      untruncated: Type.Optional(Type.Boolean({ description: 'Return full result without truncation.' })),
     }),
     async execute(_toolCallId, params, signal) {
       const data = await chromeRequest(
@@ -564,16 +674,6 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
         signal
       );
 
-      if (!params.untruncated && data?.result) {
-        const res = data.result as { headings?: unknown[]; sections?: unknown[]; links?: unknown[]; tables?: unknown[] } | undefined;
-        if (res && typeof res === 'object' && JSON.stringify(res).length > 50000) {
-          if (res.sections) res.sections = res.sections.slice(0, 5);
-          if (res.links) res.links = res.links.slice(0, 10);
-          if (res.tables) res.tables = res.tables.slice(0, 2);
-          data.result = res;
-        }
-      }
-
       return textResult(data);
     },
   });
@@ -582,18 +682,14 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'chrome_extract_regions',
     label: 'Chrome Extract Regions',
-    description: 'Extract visible text regions/containers from a Chrome tab page. Useful for listing job cards, product items, search results, or any repeated content blocks.',
-    promptSnippet: 'Extract all visible content regions from a Chrome tab page.',
-    promptGuidelines: [
-      'Use chrome_extract_regions to find repeated content blocks (job listings, search results, product cards) without knowing CSS selectors.',
-      'Returns regions with their class, text content, and any links inside.',
-      'Use maxResults to limit output when pages have many elements.',
-    ],
+    description: 'Extract visible text regions/containers from a Chrome tab page.',
+    promptSnippet: 'Extract content regions from a Chrome tab page.',
+    promptGuidelines: ['Use chrome_extract_regions to find repeated content blocks.'],
     parameters: Type.Object({
       tabId: Type.Number({ description: 'Chrome tab id.' }),
-      minTextLength: Type.Optional(Type.Number({ description: 'Minimum text length to include a region. Defaults to 30.' })),
-      maxResults: Type.Optional(Type.Number({ description: 'Maximum number of regions to return. Defaults to 50.' })),
-      untruncated: Type.Optional(Type.Boolean({ description: 'Whether to return full text even if very large. Defaults to false.' })),
+      minTextLength: Type.Optional(Type.Number({ description: 'Min text length. Defaults to 30.' })),
+      maxResults: Type.Optional(Type.Number({ description: 'Max results. Defaults to 50.' })),
+      untruncated: Type.Optional(Type.Boolean({ description: 'Return full text without truncation.' })),
     }),
     async execute(_toolCallId, params, signal) {
       const minLen = params.minTextLength ?? 30;
@@ -629,20 +725,6 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
             if (regions.length >= ${maxResults}) return;
           });
 
-          if (regions.length < 5) {
-            document.querySelectorAll('section, article, main, .container, .wrapper').forEach(el => {
-              if (!el.offsetParent || el.closest('.chrome-controller-overlay-root')) return;
-              const text = el.innerText.trim();
-              if (text.length < ${minLen}) return;
-              const cls = typeof el.className === 'string' ? el.className : '';
-              const key = cls + ':' + text.substring(0, 40);
-              if (seen.has(key)) return;
-              seen.add(key);
-              regions.push({ class: cls, text: text.substring(0, ${maxTextLen}), links: [] });
-              if (regions.length >= ${maxResults}) return;
-            });
-          }
-
           return regions;
         })()`,
           returnByValue: true,
@@ -659,15 +741,12 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'chrome_console_logs',
     label: 'Chrome Console Logs',
-    description: 'Capture console log entries from a Chrome tab page via the DevTools Protocol Runtime domain.',
-    promptSnippet: 'Obtain Chrome JS console logs from a tab page through Chrome Controller.',
-    promptGuidelines: [
-      'Use chrome_console_logs to inspect console output (log, warn, error) from a page.',
-      'Logs are collected for a short window (default 2 seconds). Use timeoutMs to extend.',
-    ],
+    description: 'Capture console log entries from a Chrome tab page.',
+    promptSnippet: 'Obtain Chrome JS console logs from a tab page.',
+    promptGuidelines: ['Use chrome_console_logs to inspect console output.'],
     parameters: Type.Object({
       tabId: Type.Number({ description: 'Chrome tab id.' }),
-      timeoutMs: Type.Optional(Type.Number({ description: 'How long (ms) to collect console events. Defaults to 2000.' })),
+      timeoutMs: Type.Optional(Type.Number({ description: 'How long to collect console events.' })),
     }),
     async execute(_toolCallId, params, signal) {
       return textResult(

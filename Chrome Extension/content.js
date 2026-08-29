@@ -1,4 +1,5 @@
 const ROOT_ID = 'chrome-controller-overlay-root';
+const BADGE_CONTAINER_ID = 'chrome-controller-badges-container';
 const MAX_FEED_ITEMS = 5;
 const TITLE_PREFIX = '🤖 ';
 const ROBOT_FAVICON_ID = 'chrome-controller-robot-favicon';
@@ -16,6 +17,41 @@ const state = {
   overlayHidden: false,
 };
 
+// ── Continuous Error Logging Ring Buffer ────────────────────────────────────
+const capturedErrors = [];
+const MAX_CAPTURED_ERRORS = 50;
+
+function recordError(type, message, source, lineno, colno, stack) {
+  capturedErrors.push({
+    type,
+    message: String(message || ''),
+    source: source || location.href,
+    lineno: lineno || 0,
+    colno: colno || 0,
+    stack: stack ? String(stack).slice(0, 1000) : null,
+    timestamp: Date.now(),
+  });
+  if (capturedErrors.length > MAX_CAPTURED_ERRORS) {
+    capturedErrors.shift();
+  }
+}
+
+window.addEventListener('error', (event) => {
+  recordError('error', event.message, event.filename, event.lineno, event.colno, event.error?.stack);
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+  recordError('unhandledrejection', event.reason?.message || event.reason, location.href, 0, 0, event.reason?.stack);
+});
+
+// Patch console.error
+const origConsoleError = console.error;
+console.error = function (...args) {
+  recordError('console.error', args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '));
+  origConsoleError.apply(console, args);
+};
+
+// ── Helper Utilities ────────────────────────────────────────────────────────
 function truncate(value, length) {
   const text = String(value || '');
   return text.length > length ? `${text.slice(0, length - 1)}...` : text;
@@ -136,288 +172,209 @@ function setTitleMarker(enabled) {
   }
 }
 
-function getFaviconLinks() {
-  return Array.from(document.querySelectorAll('link[rel~="icon"], link[rel="shortcut icon"], link[rel="apple-touch-icon"]'));
-}
-
-function getBestFaviconHref() {
-  const links = getFaviconLinks();
-  const preferred = links.find((link) => link.rel === 'icon' && link.href)
-    || links.find((link) => link.href);
-  return preferred?.href || '/favicon.ico';
-}
-
-function makeCompositeRobotFaviconHref(originalHref) {
-  const safeOriginalHref = String(originalHref || '/favicon.ico')
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-  const svg = `
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="10" fill="#07111d"/>
-  <image href="${safeOriginalHref}" x="2" y="2" width="60" height="60" preserveAspectRatio="xMidYMid meet"/>
-  <circle cx="46" cy="46" r="17" fill="#07111d" stroke="#70e9ff" stroke-width="4"/>
-  <rect x="35" y="39" width="22" height="16" rx="5" fill="#70e9ff"/>
-  <path d="M46 39v-6" stroke="#70e9ff" stroke-width="3" stroke-linecap="round"/>
-  <circle cx="46" cy="31" r="3" fill="#ffda6a"/>
-  <circle cx="41" cy="46" r="2.2" fill="#07111d"/>
-  <circle cx="51" cy="46" r="2.2" fill="#07111d"/>
-  <path d="M42 52h8" stroke="#07111d" stroke-width="2.5" stroke-linecap="round"/>
-</svg>`;
-  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
-}
-
-function setRobotFavicon(enabled) {
-  if (enabled) {
-    if (!state.originalFavicons) {
-      state.originalFavicons = getFaviconLinks().map((link) => ({
-        rel: link.getAttribute('rel'),
-        href: link.getAttribute('href'),
-        type: link.getAttribute('type'),
-        sizes: link.getAttribute('sizes'),
-      }));
-    }
-
-    getFaviconLinks().forEach((link) => {
-      if (link.id !== ROBOT_FAVICON_ID) {
-        link.dataset.chromeControllerHiddenFavicon = 'true';
-        link.disabled = true;
-      }
-    });
-
-    let robotLink = document.getElementById(ROBOT_FAVICON_ID);
-    if (!robotLink) {
-      robotLink = document.createElement('link');
-      robotLink.id = ROBOT_FAVICON_ID;
-      robotLink.rel = 'icon';
-      document.head.appendChild(robotLink);
-    }
-    robotLink.type = 'image/svg+xml';
-    robotLink.href = makeCompositeRobotFaviconHref(getBestFaviconHref());
-    return;
-  }
-
-  const robotLink = document.getElementById(ROBOT_FAVICON_ID);
-  if (robotLink) robotLink.remove();
-
-  document.querySelectorAll('link[data-chrome-controller-hidden-favicon="true"]').forEach((link) => {
-    link.disabled = false;
-    delete link.dataset.chromeControllerHiddenFavicon;
-  });
-
-  if (state.originalFavicons && getFaviconLinks().length === 0) {
-    state.originalFavicons.forEach((item) => {
-      const link = document.createElement('link');
-      if (item.rel) link.setAttribute('rel', item.rel);
-      if (item.href) link.setAttribute('href', item.href);
-      if (item.type) link.setAttribute('type', item.type);
-      if (item.sizes) link.setAttribute('sizes', item.sizes);
-      document.head.appendChild(link);
-    });
-  }
-  state.originalFavicons = null;
-}
-
-function updateCursor(x, y, status = 'Moving') {
-  if (typeof x !== 'number' || typeof y !== 'number') return;
+function updateCursor(x, y, label) {
+  if (x == null || y == null) return;
+  state.cursor = { x, y };
 
   const root = ensureOverlay();
-  const cursor = root.querySelector('.chrome-controller-cursor');
-  const coords = root.querySelector('.chrome-controller-coords');
-  const roundedX = Math.round(x);
-  const roundedY = Math.round(y);
-
-  state.cursor = { x: roundedX, y: roundedY };
-  cursor.style.transform = `translate3d(${roundedX}px, ${roundedY}px, 0)`;
-  coords.textContent = `x ${roundedX}, y ${roundedY}`;
-  setStatus(status);
   setRootClass('chrome-controller-has-cursor', true);
-  spawnTrail(roundedX, roundedY);
+  const cursor = root.querySelector('.chrome-controller-cursor');
+  cursor.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+
+  const coords = root.querySelector('.chrome-controller-coords');
+  coords.textContent = `x ${Math.round(x)}, y ${Math.round(y)}`;
+  if (label) setStatus(label);
 }
 
-function spawnTrail(x, y) {
-  const dot = document.createElement('span');
-  dot.className = 'chrome-controller-trail';
-  dot.style.left = `${x}px`;
-  dot.style.top = `${y}px`;
-  ensureOverlay().appendChild(dot);
-  setTimeout(() => dot.remove(), 420);
-}
-
-function spawnRipple(x, y, tone = 'click') {
-  if (typeof x !== 'number' || typeof y !== 'number') return;
+function spawnRipple(x, y, kind = 'click') {
+  if (x == null || y == null) return;
+  const root = ensureOverlay();
   const ripple = document.createElement('div');
-  ripple.className = `chrome-controller-ripple chrome-controller-ripple-${tone}`;
-  ripple.style.left = `${Math.round(x)}px`;
-  ripple.style.top = `${Math.round(y)}px`;
-  ensureOverlay().appendChild(ripple);
-  setTimeout(() => ripple.remove(), 720);
+  ripple.className = `chrome-controller-ripple chrome-controller-ripple-${kind}`;
+  ripple.style.left = `${x}px`;
+  ripple.style.top = `${y}px`;
+  root.appendChild(ripple);
+  setTimeout(() => ripple.remove(), 700);
+}
+
+function setAudioMuted(muted) {
+  state.audioMuted = muted;
+  const btn = ensureOverlay().querySelector('.chrome-controller-audio-btn');
+  if (btn) {
+    btn.textContent = muted ? '🔇' : '🔊';
+    btn.setAttribute('aria-label', muted ? 'Unmute typing sounds' : 'Mute typing sounds');
+  }
+}
+
+function setOverlayHidden(hidden) {
+  state.overlayHidden = Boolean(hidden);
+  setRootClass('chrome-controller-hidden-overlay', state.overlayHidden);
 }
 
 function flashSelectedTab() {
   const root = ensureOverlay();
   root.classList.remove('chrome-controller-flash');
-  requestAnimationFrame(() => root.classList.add('chrome-controller-flash'));
+  void root.offsetWidth;
+  root.classList.add('chrome-controller-flash');
 }
 
-function createTypingBurst(text) {
-  const root = ensureOverlay();
-  const typing = root.querySelector('.chrome-controller-typing');
-  const source = String(text || '').replace(/\s+/g, ' ');
-  const visibleText = source || 'key event';
-  const maxChars = 80;
-  let index = 0;
+// ── Element Snapshotting & Ref Tagging ─────────────────────────────────────
 
-  clearInterval(state.typingTimer);
-  typing.hidden = false;
-  typing.textContent = '';
-  setStatus('Typing', visibleText);
+function snapshotElements(options = {}) {
+  const showOverlay = options.showOverlay !== false;
 
-  state.typingTimer = setInterval(() => {
-    const chunkSize = Math.max(1, Math.min(5, Math.ceil((visibleText.length - index) / 8)));
-    const next = visibleText.slice(index, index + chunkSize);
-    index += chunkSize;
-    typing.textContent = truncate(visibleText.slice(0, index), maxChars);
-    spawnKeyBurst(next);
+  // Clear existing badge overlay container if present
+  let badgeContainer = document.getElementById(BADGE_CONTAINER_ID);
+  if (badgeContainer) badgeContainer.remove();
 
-    if (index >= visibleText.length) {
-      clearInterval(state.typingTimer);
-      state.typingTimer = setTimeout(() => {
-        typing.hidden = true;
-        typing.textContent = '';
-        setStatus('Selected');
-      }, 700);
-    }
-  }, 18);
-}
-
-function spawnKeyBurst(text) {
-  if (!text) return;
-  const root = ensureOverlay();
-  const burst = document.createElement('span');
-  burst.className = 'chrome-controller-keyburst';
-  burst.textContent = truncate(text, 6);
-
-  const x = state.cursor.x ?? Math.min(window.innerWidth - 84, 92);
-  const y = state.cursor.y ?? 96;
-  burst.style.left = `${x + 14 + Math.random() * 18}px`;
-  burst.style.top = `${y - 24 - Math.random() * 16}px`;
-  root.appendChild(burst);
-  setTimeout(() => burst.remove(), 680);
-}
-
-function playTypingSound() {
-  if (state.audioMuted) return;
-  const now = performance.now();
-  if (now - state.lastSoundAt < 26) return;
-  state.lastSoundAt = now;
-
-  try {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass) return;
-
-    if (!state.audioContext) {
-      state.audioContext = new AudioContextClass();
-      if (state.audioContext.state === 'suspended') {
-        state.audioContext.resume().catch(() => {});
-      }
-    }
-    const context = state.audioContext;
-
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    oscillator.type = 'triangle';
-    oscillator.frequency.value = 980 + Math.random() * 320;
-    gain.gain.setValueAtTime(0.0001, context.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.035, context.currentTime + 0.006);
-    gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.038);
-    oscillator.connect(gain);
-    gain.connect(context.destination);
-    oscillator.start();
-    oscillator.stop(context.currentTime + 0.045);
-  } catch (err) {
-    // Audio may be blocked until the page receives a user gesture.
+  if (showOverlay) {
+    badgeContainer = document.createElement('div');
+    badgeContainer.id = BADGE_CONTAINER_ID;
+    badgeContainer.style.position = 'absolute';
+    badgeContainer.style.top = '0';
+    badgeContainer.style.left = '0';
+    badgeContainer.style.width = '100%';
+    badgeContainer.style.height = '100%';
+    badgeContainer.style.pointerEvents = 'none';
+    badgeContainer.style.zIndex = '2147483640';
+    const mount = document.body || document.documentElement;
+    mount.appendChild(badgeContainer);
   }
-}
 
-function setAudioMuted(muted) {
-  state.audioMuted = muted;
-  const root = ensureOverlay();
-  const btn = root.querySelector('.chrome-controller-audio-btn');
-  if (!btn) return;
-  btn.textContent = muted ? '🔇' : '🔊';
-  btn.setAttribute('aria-label', muted ? 'Unmute typing sounds' : 'Mute typing sounds');
-  btn.setAttribute('title', muted ? 'Unmute typing sounds' : 'Mute typing sounds');
+  const selectors = [
+    'button', 'a[href]', 'input', 'textarea', 'select',
+    '[role="button"]', '[role="link"]', '[role="checkbox"]', '[role="menuitem"]',
+    '[onclick]', '[contenteditable="true"]'
+  ].join(',');
 
-  if (!muted && !state.audioContext) {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (AudioContextClass) {
-      state.audioContext = new AudioContextClass();
-      if (state.audioContext.state === 'suspended') {
-        state.audioContext.resume().catch(() => {});
-      }
+  const rawElements = Array.from(document.querySelectorAll(selectors));
+  const items = [];
+  let idCounter = 1;
+
+  for (const el of rawElements) {
+    if (el.closest(`#${ROOT_ID}`) || el.closest(`#${BADGE_CONTAINER_ID}`)) continue;
+
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0 || el.offsetParent === null) continue;
+
+    const id = idCounter++;
+    el.setAttribute('data-cc-id', String(id));
+
+    const tag = el.tagName.toUpperCase();
+    const type = el.getAttribute('type') || '';
+    const text = (el.innerText || el.ariaLabel || el.placeholder || el.value || el.title || '').trim().slice(0, 100);
+
+    let selector = tag.toLowerCase();
+    if (el.id) {
+      selector += `#${CSS.escape(el.id)}`;
+    } else if (el.className && typeof el.className === 'string') {
+      const cls = el.className.split(/\s+/).filter(Boolean)[0];
+      if (cls) selector += `.${CSS.escape(cls)}`;
+    }
+
+    items.push({
+      id,
+      tag,
+      type,
+      text,
+      selector,
+      bbox: {
+        x: Math.round(rect.left + window.scrollX),
+        y: Math.round(rect.top + window.scrollY),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      },
+    });
+
+    if (showOverlay && badgeContainer) {
+      const badge = document.createElement('div');
+      badge.textContent = String(id);
+      badge.style.position = 'absolute';
+      badge.style.left = `${rect.left + window.scrollX}px`;
+      badge.style.top = `${rect.top + window.scrollY}px`;
+      badge.style.background = '#06b6d4';
+      badge.style.color = '#0f172a';
+      badge.style.fontSize = '11px';
+      badge.style.fontWeight = 'bold';
+      badge.style.padding = '1px 5px';
+      badge.style.borderRadius = '4px';
+      badge.style.boxShadow = '0 2px 4px rgba(0,0,0,0.4)';
+      badge.style.pointerEvents = 'none';
+      badgeContainer.appendChild(badge);
     }
   }
+
+  logAction('Snapshot', `Tagged ${items.length} interactive elements`);
+  return { elements: items, count: items.length };
 }
 
-function setOverlayHidden(hidden) {
-  state.overlayHidden = hidden;
-  const root = document.getElementById(ROOT_ID);
-  if (root) {
-    root.style.display = hidden ? 'none' : '';
+function findElement(selector, elementId) {
+  if (elementId != null) {
+    const el = document.querySelector(`[data-cc-id="${elementId}"]`);
+    if (el) return el;
   }
+  if (selector) {
+    const el = document.querySelector(selector);
+    if (el) return el;
+  }
+  throw new Error(`Element not found for selector="${selector}" elementId="${elementId}"`);
 }
 
-function spawnSparkle() {
-  if (!state.selected) return;
-  const root = ensureOverlay();
-  const layer = root.querySelector('.chrome-controller-sparkles');
-  if (!layer) return;
+function clickSelector(options = {}) {
+  const el = findElement(options.selector, options.elementId);
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const rect = el.getBoundingClientRect();
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
 
-  const sparkle = document.createElement('span');
-  const width = 2 + Math.round(Math.random() * 4);
-  const height = Math.max(1, width - Math.round(Math.random() * 2));
-  sparkle.className = 'chrome-controller-sparkle';
-  sparkle.style.left = `${6 + Math.random() * 88}vw`;
-  sparkle.style.top = `${8 + Math.random() * 82}vh`;
-  sparkle.style.width = `${width}px`;
-  sparkle.style.height = `${height}px`;
-  sparkle.style.setProperty('--cc-dust-x', `${Math.round((Math.random() - 0.5) * 60)}px`);
-  sparkle.style.setProperty('--cc-dust-y', `${Math.round((Math.random() - 0.5) * 60)}px`);
-  sparkle.style.setProperty('--cc-dust-rx', Math.random().toFixed(2));
-  sparkle.style.setProperty('--cc-dust-ry', Math.random().toFixed(2));
-  sparkle.style.setProperty('--cc-dust-rz', Math.random().toFixed(2));
-  sparkle.style.setProperty('--cc-dust-rot', `${Math.round((Math.random() - 0.5) * 720)}deg`);
-  sparkle.style.animationDelay = `${Math.random() * 220}ms`;
-  layer.appendChild(sparkle);
-  setTimeout(() => sparkle.remove(), 4400);
+  updateCursor(cx, cy, 'Clicking');
+  spawnRipple(cx, cy, 'click');
+
+  el.focus();
+  el.click();
+  logAction('Click selector', options.selector || `[${options.elementId}]`);
+  return { success: true, text: (el.innerText || el.value || '').trim() };
 }
 
-function setSparkles(enabled) {
-  if (enabled) {
-    if (state.sparkleTimer) return;
-    state.sparkleTimer = setInterval(spawnSparkle, 760);
-    setTimeout(spawnSparkle, 260);
-    setTimeout(spawnSparkle, 920);
-    setTimeout(spawnSparkle, 1600);
-    return;
+function fillSelector(options = {}) {
+  const el = findElement(options.selector, options.elementId);
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const rect = el.getBoundingClientRect();
+
+  updateCursor(rect.left + 10, rect.top + rect.height / 2, 'Filling text');
+
+  el.focus();
+  if ('value' in el) {
+    el.value = options.text || '';
+  } else {
+    el.textContent = options.text || '';
   }
 
-  if (state.sparkleTimer) {
-    clearInterval(state.sparkleTimer);
-    state.sparkleTimer = null;
-  }
-  const layer = document.querySelector(`#${ROOT_ID} .chrome-controller-sparkles`);
-  if (layer) layer.replaceChildren();
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+
+  logAction('Fill selector', options.text);
+  return { success: true, text: options.text };
 }
+
+function selectOption(options = {}) {
+  const el = findElement(options.selector, options.elementId);
+  if (el.tagName !== 'SELECT') {
+    throw new Error(`Target element is not a <select>, got <${el.tagName}>`);
+  }
+  el.focus();
+  el.value = options.value;
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  logAction('Select option', options.value);
+  return { success: true, value: options.value };
+}
+
+// ── Message Listener ────────────────────────────────────────────────────────
 
 function handleControllerState(request) {
   state.selected = Boolean(request.selected);
   setRootClass('chrome-controller-selected', state.selected);
   setTitleMarker(state.selected);
-  setRobotFavicon(state.selected);
-  setSparkles(state.selected);
 
   if (state.selected) {
     updateTab(request.tab);
@@ -427,11 +384,6 @@ function handleControllerState(request) {
   } else {
     setStatus('Released', request.reason);
     logAction('Released tab', request.reason);
-    setTimeout(() => {
-      if (!state.selected) {
-        setRootClass('chrome-controller-has-cursor', false);
-      }
-    }, 900);
   }
 }
 
@@ -461,18 +413,10 @@ function handleVisualAction(request) {
   }
 
   if (type === 'typing' || type === 'insertText') {
-    createTypingBurst(request.detail || '');
     if (request.sound !== false) {
-      playTypingSound();
+      setAudioMuted(false);
     }
     logAction(type === 'insertText' ? 'Insert text' : 'Type', request.detail);
-    return;
-  }
-
-  if (type === 'highlight') {
-    flashSelectedTab();
-    setStatus(request.active === false ? 'Inactive' : 'Highlighted');
-    logAction('Highlight');
     return;
   }
 
@@ -481,33 +425,32 @@ function handleVisualAction(request) {
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === 'setControllerState') {
-    handleControllerState(request);
-    sendResponse({ success: true });
-    return;
+  try {
+    if (request.action === 'setControllerState') {
+      handleControllerState(request);
+      sendResponse({ success: true });
+    } else if (request.action === 'visualizeAction') {
+      handleVisualAction(request);
+      sendResponse({ success: true });
+    } else if (request.action === 'snapshotElements') {
+      const res = snapshotElements(request);
+      sendResponse({ success: true, ...res });
+    } else if (request.action === 'clickSelector') {
+      const res = clickSelector(request);
+      sendResponse({ success: true, ...res });
+    } else if (request.action === 'fillSelector') {
+      const res = fillSelector(request);
+      sendResponse({ success: true, ...res });
+    } else if (request.action === 'selectOption') {
+      const res = selectOption(request);
+      sendResponse({ success: true, ...res });
+    } else if (request.action === 'getPageErrors') {
+      sendResponse({ success: true, errors: capturedErrors, count: capturedErrors.length });
+    } else {
+      sendResponse({ success: false, error: `Unknown content action: ${request.action}` });
+    }
+  } catch (err) {
+    sendResponse({ success: false, error: err.toString() });
   }
-
-  if (request.action === 'visualizeAction') {
-    handleVisualAction(request);
-    sendResponse({ success: true });
-    return;
-  }
-
-  // Backwards-compatible handlers for existing callers.
-  if (request.action === 'visualizeMove') {
-    handleVisualAction({ type: 'move', x: request.x, y: request.y });
-    sendResponse({ success: true });
-    return;
-  }
-
-  if (request.action === 'visualizeClick') {
-    handleVisualAction({ type: 'click', x: request.x, y: request.y });
-    sendResponse({ success: true });
-    return;
-  }
-
-  if (request.action === 'highlightTab') {
-    handleVisualAction({ type: 'highlight', active: request.active });
-    sendResponse({ success: true });
-  }
+  return true;
 });

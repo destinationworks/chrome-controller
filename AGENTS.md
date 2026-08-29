@@ -4,21 +4,24 @@ This file contains instructions for automated coding agents.
 
 ## Chrome Controller Startup
 
-Before using `chrome_*` tools, ensure the bridge server is running:
+The controller supports two operational modes:
 
-```bash
-cd /Users/dst/dev/chrome-controller && npm start
-```
+1. **Native Messaging (Primary — Zero Ports):**
+   Ensure the host manifest is registered with the active extension ID:
+   ```bash
+   npm run install-host gocbenlgkgeaiifofilndbnaeigpplca
+   ```
+   Chrome connects automatically over stdio/IPC (`/tmp/chrome-controller.sock`).
 
-This single command handles everything: kills stale servers, rebuilds if source changed, starts the server, and verifies it's healthy. The extension in Chrome must also be loaded (`Chrome Extension/` as unpacked MV3).
-
-Verify with:
-
-```bash
-curl -s http://127.0.0.1:8898/health
-```
-
-If the extension is not connected, reload it in `chrome://extensions`.
+2. **Standalone Relay Server (Fallback / Tests):**
+   If Native Messaging is unavailable, run:
+   ```bash
+   npm start
+   ```
+   This handles rebuilding, starts the bridge server, and verifies health on dynamic or pinned ports. Verify health via `chrome_controller_health` tool or:
+   ```bash
+   curl -s http://127.0.0.1:8898/health
+   ```
 
 ## User Updates
 

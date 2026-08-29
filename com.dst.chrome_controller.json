@@ -1,0 +1,9 @@
+{
+  "name": "com.dst.chrome_controller",
+  "description": "Chrome Controller Native Messaging Host for AI Agents",
+  "path": "/Users/dst/dev/chrome-controller/scripts/native-host-launcher.sh",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://*/"
+  ]
+}

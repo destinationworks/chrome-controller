@@ -1,38 +1,79 @@
 const API_KEY = 'B3C65095-74E1-4F48-9EBB-64F5DD6AB078';
 const WS_URL = 'ws://127.0.0.1:8899/?key=' + API_KEY;
+const NATIVE_HOST_NAME = 'com.dst.chrome_controller';
 const CONTROLLED_GROUP_TITLE = 'AI Tool';
 const CONTROLLED_GROUP_COLOR = 'cyan';
 const RECONNECT_ALARM = 'reconnect';
-const RECONNECT_INTERVAL_MIN = 1; // 1 min — chrome.alarms minimum period
+const RECONNECT_INTERVAL_MIN = 1;
 const KEEPALIVE_ALARM = 'keepalive';
-const KEEPALIVE_INTERVAL_MIN = 1; // 1 min — keeps worker from suspending
+const KEEPALIVE_INTERVAL_MIN = 1;
 
 let socket = null;
+let nativePort = null;
 let controlledTabId = null;
 let controlledGroupIdsByWindow = new Map();
 
-function connect() {
-  // Guard against duplicate connections (e.g. alarm firing while startup connect is in progress)
-  if (socket && socket.readyState === WebSocket.CONNECTING) {
-    console.log('Already connecting, skipping duplicate connect()');
+// ── Native Messaging ─────────────────────────────────────────────────────────
+
+function connectNative() {
+  if (nativePort) return;
+
+  try {
+    console.log('Connecting to Native Messaging host:', NATIVE_HOST_NAME);
+    nativePort = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+
+    nativePort.onMessage.addListener(async (msg) => {
+      try {
+        await handleNativeMessage(msg);
+      } catch (e) {
+        console.error('Error handling native message:', e);
+      }
+    });
+
+    nativePort.onDisconnect.addListener(() => {
+      console.log('Native Messaging host disconnected:', chrome.runtime.lastError?.message);
+      nativePort = null;
+      // Fallback to WebSocket if native host is unavailable
+      connectWs();
+    });
+  } catch (err) {
+    console.warn('Native messaging connect failed, falling back to WS:', err);
+    connectWs();
+  }
+}
+
+function sendNativeResponse(id, payload) {
+  if (nativePort && id) {
+    nativePort.postMessage({ id, ...payload });
+  }
+}
+
+async function handleNativeMessage(message) {
+  const { id, action, ...params } = message;
+  try {
+    const result = await executeAction(action, params);
+    sendNativeResponse(id, { result });
+  } catch (err) {
+    console.error(`Error executing native action ${action}:`, err);
+    sendNativeResponse(id, { error: err.toString() });
+  }
+}
+
+// ── WebSocket Fallback ────────────────────────────────────────────────────────
+
+function connectWs() {
+  if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN)) {
     return;
   }
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    console.log('Already connected, skipping connect()');
-    return;
-  }
-  // Close existing non-active socket before creating new one
   if (socket) {
     try { socket.onclose = null; socket.close(); } catch (_) {}
   }
 
-  console.log('Attempting to connect to ' + WS_URL);
+  console.log('Attempting WebSocket connection to ' + WS_URL);
   socket = new WebSocket(WS_URL);
 
   socket.onopen = () => {
     console.log('Connected to local WebSocket server');
-    // No setInterval — MV3 suspends the worker after ~30s idle.
-    // Ping + keepalive handled by chrome.alarms.
     try { chrome.alarms.clear(RECONNECT_ALARM); } catch (_) {}
     scheduleKeepaliveAlarm();
   };
@@ -40,7 +81,7 @@ function connect() {
   socket.onmessage = async (event) => {
     try {
       const data = JSON.parse(event.data);
-      await handleMessage(data);
+      await handleWsMessage(data);
     } catch (e) {
       console.error('Error parsing message:', e);
     }
@@ -48,7 +89,6 @@ function connect() {
 
   socket.onclose = () => {
     console.log('Disconnected from local WebSocket server');
-    // Clear the scheduled reconnect alarm so we don't accumulate stale alarms.
     try { chrome.alarms.clear(RECONNECT_ALARM); } catch (_) {}
     socket = null;
     scheduleReconnect();
@@ -61,13 +101,9 @@ function connect() {
 }
 
 function scheduleReconnect() {
-  // chrome.alarms fires even when the service worker is suspended,
-  // so the reconnect loop survives MV3 idle suspension.
   try {
     chrome.alarms.create(RECONNECT_ALARM, { periodInMinutes: RECONNECT_INTERVAL_MIN });
-  } catch (_) {
-    // alarms permission not available (dev mode quirks)
-  }
+  } catch (_) {}
 }
 
 function scheduleKeepaliveAlarm() {
@@ -78,15 +114,13 @@ function scheduleKeepaliveAlarm() {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === KEEPALIVE_ALARM) {
-    // Send ping to keep WebSocket alive.
     scheduleKeepaliveAlarm();
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ event: 'ping' }));
     }
   } else if (alarm.name === RECONNECT_ALARM) {
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      console.log('Alarm-triggered reconnect');
-      connect();
+    if (!nativePort && (!socket || socket.readyState !== WebSocket.OPEN)) {
+      connectNative();
     }
   }
 });
@@ -102,7 +136,6 @@ async function sendTabMessage(tabId, message) {
   try {
     return await chrome.tabs.sendMessage(tabId, message);
   } catch (err) {
-    // Restricted URLs such as chrome:// do not have content scripts.
     return null;
   }
 }
@@ -381,9 +414,7 @@ async function executeAction(action, params = {}) {
     try {
       await chrome.debugger.attach({ tabId: params.tabId }, params.requiredVersion || '1.3');
     } catch (err) {
-      if (!/already attached/i.test(err.toString())) {
-        throw err;
-      }
+      if (!/already attached/i.test(err.toString())) throw err;
     }
     result = await chrome.debugger.sendCommand(
       { tabId: params.tabId },
@@ -394,12 +425,37 @@ async function executeAction(action, params = {}) {
         awaitPromise: true,
       }
     );
-  } else if (action === 'getAllCookies') {
-    result = await chrome.cookies.getAll(params.details || {});
-  } else if (action === 'setCookie') {
-    result = await chrome.cookies.set(params.details);
-  } else if (action === 'removeCookie') {
-    result = await chrome.cookies.remove(params.details);
+  } else if (action === 'clickSelector') {
+    await setControlledTab(params.tabId, 'clickSelector');
+    result = await sendTabMessage(params.tabId, {
+      action: 'clickSelector',
+      selector: params.selector,
+      elementId: params.elementId,
+    });
+  } else if (action === 'fillSelector') {
+    await setControlledTab(params.tabId, 'fillSelector');
+    result = await sendTabMessage(params.tabId, {
+      action: 'fillSelector',
+      selector: params.selector,
+      elementId: params.elementId,
+      text: params.text,
+    });
+  } else if (action === 'selectOption') {
+    await setControlledTab(params.tabId, 'selectOption');
+    result = await sendTabMessage(params.tabId, {
+      action: 'selectOption',
+      selector: params.selector,
+      elementId: params.elementId,
+      value: params.value,
+    });
+  } else if (action === 'snapshotElements') {
+    await setControlledTab(params.tabId, 'snapshotElements');
+    result = await sendTabMessage(params.tabId, {
+      action: 'snapshotElements',
+      showOverlay: params.showOverlay !== false,
+    });
+  } else if (action === 'getPageErrors') {
+    result = await sendTabMessage(params.tabId, { action: 'getPageErrors' });
   } else if (action === 'attachDebugger') {
     await chrome.debugger.attach({ tabId: params.tabId }, params.requiredVersion || '1.3');
     await setControlledTab(params.tabId, 'attachDebugger');
@@ -408,9 +464,7 @@ async function executeAction(action, params = {}) {
     try {
       await chrome.debugger.attach({ tabId: params.tabId }, params.requiredVersion || '1.3');
     } catch (err) {
-      if (!/already attached/i.test(err.toString())) {
-        throw err;
-      }
+      if (!/already attached/i.test(err.toString())) throw err;
     }
     await setControlledTab(params.tabId, 'ensureDebugger');
     result = { success: true };
@@ -433,9 +487,7 @@ async function executeAction(action, params = {}) {
       await visualizeCdpCommand(params.tabId, params.method, commandParams);
     }
   } else if (action === 'visualizeAction') {
-    if (!params.tabId) {
-      throw new Error('tabId is required for visual actions');
-    }
+    if (!params.tabId) throw new Error('tabId is required for visual actions');
     await setControlledTab(params.tabId, 'visualizeAction');
     result = await sendTabMessage(params.tabId, {
       action: 'visualizeAction',
@@ -460,9 +512,7 @@ async function executeAction(action, params = {}) {
     try {
       await chrome.debugger.attach({ tabId: params.tabId }, params.requiredVersion || '1.3');
     } catch (err) {
-      if (!/already attached/i.test(err.toString())) {
-        throw err;
-      }
+      if (!/already attached/i.test(err.toString())) throw err;
     }
     const cmdResult = await chrome.debugger.sendCommand(
       { tabId: params.tabId },
@@ -475,9 +525,7 @@ async function executeAction(action, params = {}) {
     try {
       await chrome.debugger.attach({ tabId: params.tabId }, params.requiredVersion || '1.3');
     } catch (err) {
-      if (!/already attached/i.test(err.toString())) {
-        throw err;
-      }
+      if (!/already attached/i.test(err.toString())) throw err;
     }
 
     const fps = Number(params.fps) || 5;
@@ -496,9 +544,7 @@ async function executeAction(action, params = {}) {
           { format, quality }
         );
         frames.push({ index: i, timestamp: Date.now(), data: frame });
-        if (i < totalFrames - 1) {
-          await sleep(intervalMs);
-        }
+        if (i < totalFrames - 1) await sleep(intervalMs);
       } catch (err) {
         frames.push({ index: i, timestamp: Date.now(), error: err.toString() });
       }
@@ -510,9 +556,7 @@ async function executeAction(action, params = {}) {
     try {
       await chrome.debugger.attach({ tabId: params.tabId }, params.requiredVersion || '1.3');
     } catch (err) {
-      if (!/already attached/i.test(err.toString())) {
-        throw err;
-      }
+      if (!/already attached/i.test(err.toString())) throw err;
     }
     result = await chrome.debugger.sendCommand(
       { tabId: params.tabId },
@@ -528,13 +572,9 @@ async function executeAction(action, params = {}) {
     try {
       await chrome.debugger.attach({ tabId: params.tabId }, params.requiredVersion || '1.3');
     } catch (err) {
-      if (!/already attached/i.test(err.toString())) {
-        throw err;
-      }
+      if (!/already attached/i.test(err.toString())) throw err;
     }
-    // Enable the Runtime domain to receive console events
     await chrome.debugger.sendCommand({ tabId: params.tabId }, 'Runtime.enable');
-    // Collect console events for a short window
     const logs = [];
     const timeout = Number(params.timeoutMs || 2000);
     const collected = await new Promise((resolve) => {
@@ -566,9 +606,8 @@ async function executeAction(action, params = {}) {
   return result;
 }
 
-async function handleMessage(message) {
+async function handleWsMessage(message) {
   const { id, action, ...params } = message;
-
   try {
     const result = await executeAction(action, params);
     sendSocketResponse(id, { result });
@@ -579,8 +618,12 @@ async function handleMessage(message) {
 }
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
+  const payload = JSON.stringify({ event: 'debuggerEvent', source, method, params });
+  if (nativePort) {
+    nativePort.postMessage(payload);
+  }
   if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({ event: 'debuggerEvent', source, method, params }));
+    socket.send(payload);
   }
 });
 
@@ -596,4 +639,5 @@ chrome.tabGroups.onRemoved.addListener((group) => {
   }
 });
 
-connect();
+// Try connecting via Native Messaging host first
+connectNative();

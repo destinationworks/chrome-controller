@@ -220,12 +220,12 @@ test.describe('Server - Batch Mode', () => {
 
 test.describe('Server - Connection Rejection', () => {
   let server: ChromeControllerServer;
-  let ext1: WebSocket;
+  let _ext1: WebSocket;
 
   test.it('closes existing connection on new connection', async () => {
     // Server replaces old connection rather than rejecting new one
     server = createServer();
-    ext1 = await connectExtension(server);
+    _ext1 = await connectExtension(server);
     await delay(50);
     // Second connection should succeed but close the first on server side
     const ext2 = await connectExtension(server);
@@ -446,7 +446,7 @@ test.describe('Server - Process Command', () => {
 test.describe('Server - Discovery Directory Creation', () => {
   test.it('creates discovery directory if missing', () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-disc2-'));
-    const nested = path.join(tmpDir, 'sub', 'dir');
+    const _nested = path.join(tmpDir, 'sub', 'dir');
     // writeDiscovery creates DISCOVERY_DIR; we test it doesn't crash
     const info = { httpPort: 1111, wsPort: 1112, apiKey: 'k', pid: process.pid, startedAt: new Date().toISOString() };
     writeDiscovery('disc-dir-test', info);

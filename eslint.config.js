@@ -10,11 +10,11 @@ export default [
       },
     },
     plugins: {
-      '@typescript-eslint': await import('@typescript-eslint/eslint-plugin'),
+      '@typescript-eslint': (await import('@typescript-eslint/eslint-plugin')).default,
     },
     rules: {
-      '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
-      'no-console': 'warn',
+      '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
+      'no-console': 'off',
       'no-duplicate-imports': 'error',
     },
   },

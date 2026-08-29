@@ -1,0 +1,12 @@
+{
+  "source": "live-extension",
+  "manifestName": "p agent extension",
+  "manifestVersion": "1.1.1",
+  "demoHtmlSha256": "6628ba8944be15d878b3a412a227250e38af9a655ea60258771ac219f3084e77",
+  "width": 1280,
+  "height": 800,
+  "snapshotElementCount": 1,
+  "overlayBadgeCount": 1,
+  "hudExpanded": true,
+  "sha256": "471bfe9cceeca526a384b6e176577ca697e650976a5907d9070d5e0efc78f5b7"
+}

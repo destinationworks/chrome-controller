@@ -56,6 +56,11 @@ test('extension registers all expected tools', () => {
     'chrome_extract_content',
     'chrome_extract_regions',
     'chrome_console_logs',
+    'chrome_click',
+    'chrome_fill',
+    'chrome_select_option',
+    'chrome_snapshot_elements',
+    'chrome_get_page_errors',
   ];
   for (const name of expected) {
     assert.ok(name in pi.tools, `Missing tool: ${name}`);

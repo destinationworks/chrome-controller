@@ -2,64 +2,45 @@
 
 A local Chrome control bridge for AI agents.
 
-- **`Chrome Extension/`** — MV3 Chrome extension (WebSocket client + CDP overlay HUD)
-- **`src/server.ts`** — WebSocket/HTTP relay server (compiled to `dist/server.js`)
+- **`Chrome Extension/`** — MV3 Chrome extension (`p agent extension`)
+- **`src/native-host.ts`** — Native Messaging stdio host + `/tmp/chrome-controller.sock` Unix IPC
+- **`src/server.ts`** — Standalone WebSocket/HTTP relay server (compiled to `dist/server.js`)
 - **`src/mcp.ts`** — MCP stdio server (compiled to `dist/mcp.js`)
 - **`src/index.ts`** — Pi / Antigravity extension entry point
 
-## Quick Start
+## Quick Start (Native Messaging — Zero Ports)
 
-1. **Install:** `npm install`
-2. **Start the relay server:** `npm start`
+1. **Install dependencies & build:**
+   ```bash
+   npm install && npm run build
+   ```
+2. **Install Native Messaging Host:**
+   ```bash
+   npm run install-host <EXTENSION_ID>
+   ```
+   *(For Chrome Web Store version, use `npm run install-host gocbenlgkgeaiifofilndbnaeigpplca`)*
 
-   This single command handles everything: kills stale servers, rebuilds if source changed, starts the server, and verifies it's healthy. HTTP API on `http://127.0.0.1:8898`, WebSocket on `ws://127.0.0.1:8899`.
+3. **Configure MCP:**
+   ```json
+   {
+     "mcpServers": {
+       "chrome-controller": {
+         "command": "node",
+         "args": ["/path/to/chrome-controller/dist/mcp.js"]
+       }
+     }
+   }
+   ```
+   Chrome will automatically spawn the native host process over stdio/IPC on demand.
 
-3. **Load the Chrome extension:** Open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, select `Chrome Extension/`.
+## Standalone Relay Server (HTTP/WebSocket Fallback)
 
-   You'll see `Chrome extension connected!` in the server terminal.
+For environments where Native Messaging manifests are not installed:
 
-## Environment Variables
-
-| Variable             | Default                                | Description                   |
-| -------------------- | -------------------------------------- | ----------------------------- |
-| `HTTP_PORT`          | `8898`                                 | HTTP API port                 |
-| `WS_PORT`            | `8899`                                 | WebSocket port                |
-| `API_KEY`            | `B3C65095-74E1-4F48-9EBB-64F5DD6AB078` | Auth key                      |
-| `REQUEST_TIMEOUT_MS` | `10000`                                | Per-command timeout           |
-| `MAX_BATCH_ACTIONS`  | `50`                                   | Max actions per batch request |
-
-## Pi Extension Setup
-
-Add the repo root to `~/.pi/agent/settings.json`:
-
-```json
-{
-  "packages": ["/path/to/chrome-controller"]
-}
+```bash
+npm start
 ```
-
-Restart Pi. The `chrome-controller` skill and all `chrome_*` tools load automatically.
-
-## MCP Server Setup
-
-Add to your Antigravity / Claude Desktop config:
-
-```json
-{
-  "mcpServers": {
-    "chrome-controller": {
-      "command": "node",
-      "args": ["/path/to/chrome-controller/dist/mcp.js"],
-      "env": {
-        "HTTP_PORT": "8898",
-        "API_KEY": "B3C65095-74E1-4F48-9EBB-64F5DD6AB078"
-      }
-    }
-  }
-}
-```
-
-> The relay server (`npm start`) must be running separately. The MCP server only proxies tool calls to it.
+Starts the relay server on `http://127.0.0.1:8898` (WebSocket `ws://127.0.0.1:8899`). Dynamic OS ports are supported by omitting fixed port env vars.
 
 ## Usage
 
@@ -94,6 +75,16 @@ npm test
 ```
 
 Tests cover the HTTP/WebSocket relay server (with a mock extension client) and the Pi extension tool logic.
+
+## Chrome Web Store assets
+
+Generate the required icon, screenshot, and small promotional tile plus the optional marquee tile:
+
+```bash
+npm run generate-store-assets
+```
+
+Upload-ready files are written to `store-assets/`. The product screenshot is captured through the running unpacked extension on a neutral local demo page so it represents actual functionality without exposing private browsing or customer data.
 
 ## Managed Tab Visibility
 

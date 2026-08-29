@@ -1,15 +1,22 @@
 {
   "name": "chrome-controller",
-  "version": "1.0.0",
-  "description": "Local Chrome control bridge — Pi extension + MCP server + WebSocket/HTTP relay",
+  "version": "1.1.1",
+  "description": "Local Chrome control bridge — Pi/AGY extension + MCP server + Native Messaging IPC",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "node scripts/start.mjs",
-    "start:fresh": "node scripts/start.mjs",
+    "start": "node scripts/start.js",
+    "start:fresh": "node scripts/start.js",
+    "native-host": "node dist/native-host.js",
+    "install-host": "node scripts/install-native-host.js",
+    "generate-icons": "node scripts/generate-icons.js",
+    "generate-store-artwork": "node scripts/generate-store-assets.js",
+    "capture-store-screenshot": "node scripts/capture-store-screenshot.js",
+    "generate-store-assets": "npm run generate-store-artwork && npm run capture-store-screenshot",
+    "package": "npm run generate-icons && node scripts/package-extension.js",
     "mcp": "node dist/mcp.js",
-    "test": "npx tsx --test src/server.test.ts src/index.test.ts src/mcp.test.ts",
+    "test": "npx tsx --test src/server.test.ts src/index.test.ts src/mcp.test.ts src/store-assets.test.ts src/manifest.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src test --max-warnings 0"
   },
@@ -35,6 +42,7 @@
     "@typescript-eslint/eslint-plugin": "^8.63.0",
     "@typescript-eslint/parser": "^8.63.0",
     "eslint": "^10.7.0",
+    "playwright-core": "^1.62.0",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0"
   }

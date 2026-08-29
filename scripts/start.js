@@ -3,7 +3,7 @@
  * Automated Chrome Controller server startup.
  *
  * Kills stale server, rebuilds if needed, starts fresh, and waits for healthy.
- * Usage: node scripts/start.mjs [--no-rebuild]
+ * Usage: node scripts/start.js [--no-rebuild]
  */
 import { spawn, execSync } from 'node:child_process';
 import { readFileSync, statSync } from 'node:fs';
