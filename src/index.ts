@@ -103,11 +103,15 @@ function sendIpcRequest(payload: Record<string, unknown>, timeoutMs = 10000): Pr
 }
 
 async function chromeRequest(payload: ChromeAction | Record<string, unknown>, signal?: AbortSignal): Promise<ChromeResponse> {
-  try {
-    return await sendIpcRequest(payload as Record<string, unknown>);
-  } catch {
-    // Fall back to HTTP relay server
-    const response = await fetch(baseUrl(), {
+  if (process.env.NODE_ENV !== 'test') {
+    try {
+      return await sendIpcRequest(payload as Record<string, unknown>);
+    } catch {
+      // Fall back to HTTP relay server
+    }
+  }
+
+  const response = await fetch(baseUrl(), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -121,16 +125,17 @@ async function chromeRequest(payload: ChromeAction | Record<string, unknown>, si
       throw new Error(data.error ?? `Chrome Controller returned HTTP ${response.status}`);
     }
     return data;
-  }
 }
 
 async function chromeHealth(signal?: AbortSignal): Promise<ChromeResponse> {
-  try {
-    const ipcRes = await sendIpcRequest({ action: 'queryTabs' });
-    if (ipcRes.success) {
-      return { success: true, extensionConnected: true, mode: 'NativeMessagingIPC' };
-    }
-  } catch {}
+  if (process.env.NODE_ENV !== 'test') {
+    try {
+      const ipcRes = await sendIpcRequest({ action: 'queryTabs' });
+      if (ipcRes.success) {
+        return { success: true, extensionConnected: true, mode: 'NativeMessagingIPC' };
+      }
+    } catch {}
+  }
 
   const response = await fetch(`${baseUrl()}/health`, { signal });
   const data = (await response.json()) as ChromeResponse;

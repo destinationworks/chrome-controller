@@ -76,10 +76,15 @@ function sendIpcCommand(action: string, params: Record<string, unknown> = {}, ti
 }
 
 export async function sendCommand(action: string, params: Record<string, unknown> = {}): Promise<unknown> {
-  try {
-    return await sendIpcCommand(action, params);
-  } catch {
-    const { httpPort: HTTP_PORT, apiKey: API_KEY } = getConfig();
+  if (!process.env.HTTP_PORT) {
+    try {
+      return await sendIpcCommand(action, params);
+    } catch {
+      // IPC unavailable, fall through to HTTP relay
+    }
+  }
+
+  const { httpPort: HTTP_PORT, apiKey: API_KEY } = getConfig();
     return new Promise((resolve, reject) => {
       const data = JSON.stringify({ ...params, action });
       const req = http.request(
@@ -115,7 +120,6 @@ export async function sendCommand(action: string, params: Record<string, unknown
       req.write(data);
       req.end();
     });
-  }
 }
 
 async function main(): Promise<void> {

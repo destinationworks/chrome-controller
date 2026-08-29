@@ -16,7 +16,7 @@
     "generate-store-assets": "npm run generate-store-artwork && npm run capture-store-screenshot",
     "package": "npm run generate-icons && node scripts/package-extension.js",
     "mcp": "node dist/mcp.js",
-    "test": "npx tsx --test src/server.test.ts src/index.test.ts src/mcp.test.ts src/store-assets.test.ts src/manifest.test.ts",
+    "test": "NODE_ENV=test npx tsx --test src/server.test.ts src/index.test.ts src/mcp.test.ts src/store-assets.test.ts src/manifest.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src test --max-warnings 0"
   },

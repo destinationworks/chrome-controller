@@ -10,50 +10,56 @@ Use this skill when the user asks you to control Chrome, inspect browser tabs, c
 ## Required Components
 
 1. **Chrome Extension** — load `Chrome Extension/` as an unpacked MV3 extension in Chrome.
-2. **Bridge Server** — `cd /path/to/chrome-controller && npm start` (kills stale server, rebuilds, starts & verifies healthy).
-3. **Pi/Antigravity Extension** — registered via `settings.json`.
+2. **Native Messaging Host (Primary — Zero Ports)** — register host via `npm run install-host <EXTENSION_ID>`. Chrome and MCP connect automatically over stdio / Unix IPC (`/tmp/chrome-controller.sock`) with zero open network ports.
+3. **Pi/Antigravity Extension / MCP** — registered via `settings.json` or `mcpServers`.
+4. **Standalone Relay Server (Fallback Only)** — `npm start` (opens HTTP/WS ports). **STRICTLY RESTRICTED**: Ports may ONLY be used when Native Messaging fails, and requires explicit user notification.
 
 ## Install
 
-### Pi
+### Native Messaging (Primary — Zero Ports)
 
-Add to `~/.pi/agent/settings.json`:
+Register the native messaging host for the active extension:
 
-```json
-{ "packages": ["/path/to/chrome-controller"] }
+```bash
+npm run install-host <EXTENSION_ID>
+# E.g. for Chrome Web Store: npm run install-host gocbenlgkgeaiifofilndbnaeigpplca
 ```
-
-Restart Pi. The `chrome-controller` skill and all `chrome_*` tools load automatically.
 
 ### Antigravity (MCP)
 
-Add to `settings.json` or Claude Desktop config:
+Add to `settings.json` or MCP configuration:
 
 ```json
 {
   "mcpServers": {
     "chrome-controller": {
       "command": "node",
-      "args": ["/path/to/chrome-controller/dist/mcp.js"],
-      "env": { "HTTP_PORT": "8898", "API_KEY": "B3C65095-..." }
+      "args": ["/path/to/chrome-controller/dist/mcp.js"]
     }
   }
 }
 ```
 
-### Environment Variables
+No port or API key environment variables are required when using Native Messaging.
 
-| Variable                    | Default                 | Description                  |
-| --------------------------- | ----------------------- | ---------------------------- |
-| `HTTP_PORT`                 | `8898`                  | HTTP API port                |
-| `WS_PORT`                   | `8899`                  | WebSocket port               |
-| `API_KEY`                   | `B3C65095-...`          | Auth key                     |
-| `CHROME_CONTROLLER_URL`     | `http://127.0.0.1:8898` | Pi extension: relay base URL |
-| `CHROME_CONTROLLER_API_KEY` | _(same as API_KEY)_     | Pi extension: auth key       |
+### Fallback Policy: Port-Based Standalone Relay
+
+> [!IMPORTANT]
+> **Zero-Ports Policy**: Do NOT start or use HTTP (`8898`) or WebSocket (`8899`) servers by default.
+> Network ports are ONLY permitted if the Native Messaging protocol fails.
+> **User Notification Required**: When falling back to port-based relay (`npm start`), you MUST explicitly notify the user that Native Messaging failed and network ports are being used as a temporary fallback.
+
+| Variable                    | Default                 | Description                                  |
+| --------------------------- | ----------------------- | -------------------------------------------- |
+| `HTTP_PORT`                 | `8898`                  | Fallback HTTP API port (relay mode only)     |
+| `WS_PORT`                   | `8899`                  | Fallback WebSocket port (relay mode only)    |
+| `API_KEY`                   | `B3C65095-...`          | Fallback Auth key (relay mode only)          |
+| `CHROME_CONTROLLER_URL`     | `http://127.0.0.1:8898` | Pi fallback: relay base URL                  |
+| `CHROME_CONTROLLER_API_KEY` | _(same as API_KEY)_     | Pi fallback: auth key                        |
 
 ## Workflow
 
-1. **Pre-flight:** Run `npm start`, then `chrome_controller_health` to confirm connection.
+1. **Pre-flight:** Run `chrome_controller_health` to confirm connection over Native Messaging (do NOT run `npm start`). If health fails, notify the user before attempting fallback options.
 2. **Find or create a tab:** `chrome_query_tabs` or `chrome_create_tab`.
 3. **Select a tab:** `chrome_select_tab` to mark an existing tab as controlled.
 4. Controlled tabs go into the **AI Tool** Chrome tab group and get a `🤖 ` title prefix.

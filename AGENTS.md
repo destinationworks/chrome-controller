@@ -23,6 +23,10 @@ The controller supports two operational modes:
    curl -s http://127.0.0.1:8898/health
    ```
 
+## MCP Tool Auto-Execution
+
+- All `chrome-controller` MCP tools (`chrome_*`) are pre-approved in global (`~/.gemini/config/mcp_config.json`), IDE (`~/.gemini/antigravity-ide/mcp_config.json`, `.vscode/settings.json`), and project (`.agents/mcp_config.json`) configurations.
+
 ## User Updates
 
 While actively working, reread `user-updates.md` for new instructions at least once per minute and incorporate any new guidance before continuing.

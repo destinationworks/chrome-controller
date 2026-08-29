@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "chrome-controller": {
+      "command": "node",
+      "args": [
+        "${workspaceFolder}/dist/mcp.js"
+      ],
+      "alwaysAllow": [
+        "chrome_controller_health",
+        "chrome_query_tabs",
+        "chrome_create_tab",
+        "chrome_select_tab",
+        "chrome_release_tab",
+        "chrome_click",
+        "chrome_fill",
+        "chrome_select_option",
+        "chrome_snapshot_elements",
+        "chrome_get_page_errors",
+        "chrome_screenshot",
+        "chrome_capture_video",
+        "chrome_evaluate",
+        "chrome_batch"
+      ]
+    }
+  }
+}

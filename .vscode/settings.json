@@ -1,0 +1,6 @@
+{
+  "antigravity.toolExecutionPolicy": "always-proceed",
+  "antigravity.mcp.alwaysAllow": [
+    "chrome-controller:*"
+  ]
+}
