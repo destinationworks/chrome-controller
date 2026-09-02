@@ -16,32 +16,37 @@ import os from 'node:os';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-function createServer(config?: Partial<ServerConfig>): ChromeControllerServer {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-test-'));
-  return createChromeControllerServer({
+async function createServer(config?: Partial<ServerConfig>): Promise<ChromeControllerServer> {
+  const srv = createChromeControllerServer({
     httpPort: 0,
     wsPort: 0,
     apiKey: 'test-key',
-    discoveryPath: path.join(tmpDir, 'discovery.json'),
+    writeDiscoveryFile: false,
     ...config
   });
+  await srv.ready;
+  return srv;
 }
 
-function post(server: { httpPort: number }, body: unknown, apiKey: string = 'test-key'): Promise<any> {
+function post(server: { httpPort: number }, body: unknown, apiKey: string = 'test-key', extraHeaders: Record<string, string> = {}): Promise<any> {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body);
+    const headers: Record<string, string> = { 'Content-Type': 'application/json', ...extraHeaders };
+    if (apiKey) headers['x-api-key'] = apiKey;
     const req = http.request(
       {
         hostname: '127.0.0.1',
         port: server.httpPort,
         path: '/',
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+        headers,
+        agent: false,
       },
       (res) => {
         const chunks: Buffer[] = [];
         res.on('data', (chunk) => chunks.push(chunk));
         res.on('end', () => {
+          req.destroy();
           try {
             resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString()) });
           } catch {
@@ -50,7 +55,10 @@ function post(server: { httpPort: number }, body: unknown, apiKey: string = 'tes
         });
       }
     );
-    req.on('error', reject);
+    req.on('error', (err) => {
+      req.destroy();
+      reject(err);
+    });
     req.write(data);
     req.end();
   });
@@ -58,12 +66,13 @@ function post(server: { httpPort: number }, body: unknown, apiKey: string = 'tes
 
 function get(server: { httpPort: number }, urlPath: string = '/'): Promise<any> {
   return new Promise((resolve, reject) => {
-    http.get(
-      { hostname: '127.0.0.1', port: server.httpPort, path: urlPath },
+    const req = http.get(
+      { hostname: '127.0.0.1', port: server.httpPort, path: urlPath, agent: false },
       (res) => {
         const chunks: Buffer[] = [];
         res.on('data', (chunk) => chunks.push(chunk));
         res.on('end', () => {
+          req.destroy();
           try {
             resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString()) });
           } catch {
@@ -71,7 +80,11 @@ function get(server: { httpPort: number }, urlPath: string = '/'): Promise<any> 
           }
         });
       }
-    ).on('error', reject);
+    );
+    req.on('error', (err) => {
+      req.destroy();
+      reject(err);
+    });
   });
 }
 
@@ -89,11 +102,15 @@ function connectMockExtension(server: { wsPort: number }): Promise<WebSocket> {
         } else if (msg.action === 'navigate') {
           ws.send(JSON.stringify({ id, result: { success: true, url: msg.url || '' } }));
         } else if (msg.action === 'click') {
-          ws.send(JSON.stringify({ id, result: { success: true } }));
+          if (msg.selector === '#fail') {
+            ws.send(JSON.stringify({ id, error: 'Element not found' }));
+          } else {
+            ws.send(JSON.stringify({ id, result: { success: true } }));
+          }
         } else if (msg.action === 'type') {
           ws.send(JSON.stringify({ id, result: { success: true } }));
         } else {
-          ws.send(JSON.stringify({ id, error: `Unknown action: ${msg.action}` }));
+          ws.send(JSON.stringify({ id, error: `Action failed in extension: ${msg.action}` }));
         }
       } catch {
         // ignore malformed messages
@@ -112,7 +129,10 @@ function connectExtension(server: { wsPort: number }): Promise<WebSocket> {
 }
 
 function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    t.unref();
+  });
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -122,7 +142,7 @@ test.describe('Server - Basic', () => {
   let ext: WebSocket;
 
   test.it('starts and responds to health check', async () => {
-    server = createServer();
+    server = await createServer();
     const res = await get(server, '/health');
     assert.equal(res.status, 200);
     assert.equal(res.body.success, true);
@@ -145,7 +165,7 @@ test.describe('Server - Basic', () => {
 
   test.it('rejects unknown action via extension error', async () => {
     ext = await connectMockExtension(server);
-    const res = await post(server, { action: 'nonexistent' });
+    const res = await post(server, { action: 'removeTab', tabId: 999 });
     assert.equal(res.status, 400);
     assert.ok(res.body.error);
     ext.close();
@@ -171,7 +191,7 @@ test.describe('Server - Batch Mode', () => {
   let ext: WebSocket;
 
   test.it('executes multiple commands in a batch', async () => {
-    server = createServer();
+    server = await createServer();
     ext = await connectMockExtension(server);
 
     const res = await post(server, {
@@ -202,7 +222,7 @@ test.describe('Server - Batch Mode', () => {
       action: 'batch',
       commands: [
         { action: 'queryTabs', queryInfo: {} },
-        { action: 'unknownAction' },
+        { action: 'click', selector: '#fail' },
       ],
     });
     assert.equal(res.status, 207);
@@ -223,22 +243,20 @@ test.describe('Server - Connection Rejection', () => {
   let _ext1: WebSocket;
 
   test.it('closes existing connection on new connection', async () => {
-    // Server replaces old connection rather than rejecting new one
-    server = createServer();
+    server = await createServer();
     _ext1 = await connectExtension(server);
     await delay(50);
-    // Second connection should succeed but close the first on server side
     const ext2 = await connectExtension(server);
     await delay(200);
-    // ext2 should be connected now
     assert.ok(ext2.readyState === WebSocket.OPEN);
+    _ext1.close();
     ext2.close();
     await delay(50);
     server.close();
   });
 
   test.it('accepts new connection after previous disconnects', async () => {
-    server = createServer();
+    server = await createServer();
     const w = new WebSocket(`ws://127.0.0.1:${server.wsPort}?key=test-key`);
     await new Promise<void>((resolve) => {
       w.on('open', () => w.close());
@@ -259,14 +277,14 @@ test.describe('Server - HTTP Error Handling', () => {
   let server: ChromeControllerServer;
 
   test.it('returns 404 for unknown paths', async () => {
-    server = createServer();
+    server = await createServer();
     const res = await get(server, '/unknown');
     assert.equal(res.status, 404);
     server.close();
   });
 
   test.it('returns 503 when no extension is connected', async () => {
-    server = createServer();
+    server = await createServer();
     const res = await post(server, { action: 'queryTabs', queryInfo: {} });
     assert.equal(res.status, 503);
     assert.ok(res.body.error);
@@ -274,10 +292,10 @@ test.describe('Server - HTTP Error Handling', () => {
   });
 
   test.it('returns 503 after extension disconnects', async () => {
-    server = createServer();
+    server = await createServer();
     const ext = await connectExtension(server);
-    ext.terminate(); // Force immediate close
-    await delay(500); // Give server time to detect disconnect
+    ext.terminate();
+    await delay(500);
     const res = await post(server, { action: 'queryTabs', queryInfo: {} });
     assert.equal(res.status, 503);
     server.close();
@@ -289,22 +307,22 @@ test.describe('Server - Extension Close Events', () => {
   let ext: WebSocket;
 
   test.it('extension emits close event when it closes normally', async () => {
-    server = createServer();
+    server = await createServer();
     ext = await connectExtension(server);
     const closed = Promise.withResolvers<void>();
     ext.on('close', () => closed.resolve());
     ext.close();
-    await Promise.race([closed.promise, delay(5000)]);
+    await Promise.race([closed.promise, delay(1000)]);
     server.close();
   });
 
   test.it('extension emits close event when it crashes', async () => {
-    server = createServer();
+    server = await createServer();
     ext = await connectExtension(server);
     const closed = Promise.withResolvers<void>();
     ext.on('close', () => closed.resolve());
     ext.terminate();
-    await Promise.race([closed.promise, delay(5000)]);
+    await Promise.race([closed.promise, delay(1000)]);
     server.close();
   });
 });
@@ -337,7 +355,7 @@ test.describe('Server - Dynamic Port Assignment', () => {
   let server: ChromeControllerServer;
 
   test.it('reports actual bound ports in health endpoint', async () => {
-    server = createServer({ httpPort: 0, wsPort: 0 });
+    server = await createServer({ httpPort: 0, wsPort: 0 });
     const res = await get(server, '/health');
     assert.equal(res.status, 200);
     assert.ok(res.body.httpPort > 0);
@@ -351,14 +369,14 @@ test.describe('Server - Extension Error Passthrough', () => {
   let ext: WebSocket;
 
   test.it('passes through errors from extension', async () => {
-    server = createServer();
+    server = await createServer();
     ext = await connectMockExtension(server);
 
     const res = await post(server, { action: 'queryTabs', queryInfo: {} });
     assert.equal(res.status, 200);
     assert.equal(res.body.success, true);
 
-    const res2 = await post(server, { action: 'badAction' });
+    const res2 = await post(server, { action: 'click', selector: '#fail' });
     assert.equal(res2.status, 400);
     assert.ok(res2.body.error);
 
@@ -373,7 +391,7 @@ test.describe('Server - Batch with actions array', () => {
   let ext: WebSocket;
 
   test.it('executes batch via commands array', async () => {
-    server = createServer();
+    server = await createServer();
     ext = await connectMockExtension(server);
 
     const res = await post(server, {
@@ -392,8 +410,33 @@ test.describe('Server - Batch with actions array', () => {
     }
   });
 
+  test.it('rejects batch with disallowed action name', async () => {
+    const res = await post(server, {
+      action: 'batch',
+      commands: [
+        { action: 'queryTabs' },
+        { action: 'unauthorizedArbitraryCdp' },
+      ],
+    });
+    assert.equal(res.status, 400);
+    assert.ok(res.body.error);
+    assert.ok(res.body.error.includes('specifies disallowed action'));
+  });
+
+  test.it('rejects nested batch within batch payload', async () => {
+    const res = await post(server, {
+      action: 'batch',
+      commands: [
+        { action: 'queryTabs' },
+        { action: 'batch', commands: [] },
+      ],
+    });
+    assert.equal(res.status, 400);
+    assert.ok(res.body.error);
+    assert.ok(res.body.error.includes('cannot be a nested batch'));
+  });
+
   test.it('rejects batch exceeding max actions', async () => {
-    // Server caps batch at 50 commands
     const tooMany = Array(51).fill({ action: 'queryTabs' });
     const res = await post(server, { action: 'batch', commands: tooMany });
     assert.equal(res.status, 400);
@@ -408,20 +451,36 @@ test.describe('Server - Batch with actions array', () => {
 
 test.describe('Server - WS Auth Failure', () => {
   test.it('rejects WebSocket connection with wrong API key', async () => {
-    const server = createServer();
+    const server = await createServer();
     const ws = new WebSocket(`ws://127.0.0.1:${server.wsPort}?key=wrong`);
-    await new Promise<void>((resolve) => {
-      ws.on('close', () => resolve());
+    const { code, reason } = await new Promise<{ code: number; reason: string }>((resolve) => {
+      ws.on('close', (c, r) => resolve({ code: c, reason: r.toString() }));
     });
+    assert.equal(code, 1008);
+    assert.equal(reason, 'Invalid API key');
     server.close();
   });
 
   test.it('rejects WebSocket connection without API key', async () => {
-    const server = createServer();
+    const server = await createServer();
     const ws = new WebSocket(`ws://127.0.0.1:${server.wsPort}`);
-    await new Promise<void>((resolve) => {
-      ws.on('close', () => resolve());
+    const { code, reason } = await new Promise<{ code: number; reason: string }>((resolve) => {
+      ws.on('close', (c, r) => resolve({ code: c, reason: r.toString() }));
     });
+    assert.equal(code, 1008);
+    assert.equal(reason, 'Invalid API key');
+    server.close();
+  });
+});
+
+test.describe('Server - Body Size Limits', () => {
+  test.it('rejects payload exceeding MAX_BODY_BYTES', async () => {
+    const server = await createServer({ maxBodyBytes: 1024 });
+    const largePayload = { action: 'queryTabs', padding: 'x'.repeat(2048) };
+    const res = await post(server, largePayload);
+    assert.equal(res.status, 400);
+    assert.ok(res.body.error);
+    assert.ok(res.body.error.includes('Request body exceeds'));
     server.close();
   });
 });
@@ -431,9 +490,8 @@ test.describe('Server - Process Command', () => {
   let ext: WebSocket;
 
   test.it('processes command with missing id gracefully', async () => {
-    server = createServer();
+    server = await createServer();
     ext = await connectMockExtension(server);
-    // Server assigns its own id if not present
     const res = await post(server, { action: 'queryTabs' });
     assert.equal(res.status, 200);
     assert.equal(res.body.success, true);
@@ -447,7 +505,6 @@ test.describe('Server - Discovery Directory Creation', () => {
   test.it('creates discovery directory if missing', () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-disc2-'));
     const _nested = path.join(tmpDir, 'sub', 'dir');
-    // writeDiscovery creates DISCOVERY_DIR; we test it doesn't crash
     const info = { httpPort: 1111, wsPort: 1112, apiKey: 'k', pid: process.pid, startedAt: new Date().toISOString() };
     writeDiscovery('disc-dir-test', info);
     const read = readDiscovery('disc-dir-test');
@@ -466,10 +523,8 @@ test.describe('Server - Request Timeout', () => {
   let ext: WebSocket;
 
   test.it('rejects with timeout when extension does not respond', async () => {
-    server = createServer({ defaultTimeoutMs: 300 });
-    // Connect a dummy extension that ignores messages
+    server = await createServer({ defaultTimeoutMs: 300 });
     ext = await connectExtension(server);
-    // Extension won't respond, so request should time out
     const res = await post(server, { action: 'queryTabs', queryInfo: {} });
     assert.equal(res.status, 400);
     assert.ok(res.body.error);
@@ -483,7 +538,7 @@ test.describe('Server - Invalid JSON Payload', () => {
   let server: ChromeControllerServer;
 
   test.it('rejects invalid JSON in request body', async () => {
-    server = createServer();
+    server = await createServer();
     const res = await new Promise<any>((resolve) => {
       const req = http.request(
         {
@@ -505,7 +560,7 @@ test.describe('Server - Invalid JSON Payload', () => {
           });
         }
       );
-      req.on('error', reject => reject());
+      req.on('error', () => resolve({ status: 500 }));
       req.write('not-json{');
       req.end();
     });
@@ -515,108 +570,17 @@ test.describe('Server - Invalid JSON Payload', () => {
   });
 });
 
-test.describe('Server - Sequential Batch Mode', () => {
-  let server: ChromeControllerServer;
-  let ext: WebSocket;
-
-  test.it('executes batch in sequential mode', async () => {
-    server = createServer();
-    ext = await connectMockExtension(server);
-
-    const res = await post(server, {
-      action: 'batch',
-      commands: [
-        { action: 'queryTabs', queryInfo: {} },
-        { action: 'click', selector: '#btn' },
-      ],
-      mode: 'sequential',
-    });
-    assert.equal(res.status, 200);
-    assert.equal(res.body.success, true);
-    assert.equal(res.body.mode, 'sequential');
-    ext.close();
-    await delay(50);
-    server.close();
-  });
-
-  test.it('sequential batch stops on error when stopOnError is true', async () => {
-    server = createServer();
-    ext = await connectMockExtension(server);
-
-    const res = await post(server, {
-      action: 'batch',
-      commands: [
-        { action: 'unknownAction' },
-        { action: 'queryTabs', queryInfo: {} },
-      ],
-      mode: 'sequential',
-      stopOnError: true,
-    });
-    assert.equal(res.status, 207);
-    // Should only have 1 result (stopped after first error)
-    assert.equal(res.body.results.length, 1);
-    assert.equal(res.body.results[0].success, false);
-    ext.close();
-    await delay(50);
-    server.close();
-  });
-
-  test.it('sequential batch continues on error when stopOnError is false', async () => {
-    server = createServer();
-    ext = await connectMockExtension(server);
-
-    const res = await post(server, {
-      action: 'batch',
-      commands: [
-        { action: 'queryTabs', queryInfo: {} },
-        { action: 'unknownAction' },
-        { action: 'click', selector: '#btn' },
-      ],
-      mode: 'sequential',
-      stopOnError: false,
-    });
-    assert.equal(res.status, 207);
-    assert.equal(res.body.results.length, 3);
-    assert.equal(res.body.results[0].success, true);
-    assert.equal(res.body.results[1].success, false);
-    assert.equal(res.body.results[2].success, true);
-    ext.close();
-    await delay(50);
-    server.close();
-  });
-});
-
 test.describe('Server - Bearer Token Auth', () => {
   let server: ChromeControllerServer;
 
   test.it('accepts Bearer token in Authorization header', async () => {
-    server = createServer();
-    const res = await new Promise<any>((resolve) => {
-      const req = http.request(
-        {
-          hostname: '127.0.0.1',
-          port: server.httpPort,
-          path: '/',
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'authorization': 'Bearer test-key' },
-        },
-        (httpRes) => {
-          const chunks: Buffer[] = [];
-          httpRes.on('data', (chunk) => chunks.push(chunk));
-          httpRes.on('end', () => {
-            try {
-              resolve({ status: httpRes.statusCode, body: JSON.parse(Buffer.concat(chunks).toString()) });
-            } catch {
-              resolve({ status: httpRes.statusCode, body: Buffer.concat(chunks).toString() });
-            }
-          });
-        }
-      );
-      req.write(JSON.stringify({ action: 'queryTabs' }));
-      req.end();
-    });
-    // Should get 503 (no extension) rather than 401 (auth passed)
+    server = await createServer();
+    const res = await post(server, { action: 'queryTabs' }, '', { authorization: 'Bearer test-key' });
     assert.equal(res.status, 503);
     server.close();
   });
+});
+
+test.after(() => {
+  http.globalAgent.destroy();
 });

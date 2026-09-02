@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "p agent extension",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Local browser control bridge for AI agents via Native Messaging",
   "author": "dst.works@gmail.com",
   "icons": {

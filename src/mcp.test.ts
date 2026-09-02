@@ -237,4 +237,149 @@ test('sendCommand rejects when server returns error response', async () => {
   }
 });
 
+test('sendCommand fails closed with NATIVE_IPC_UNAVAILABLE when IPC is down and relay is disabled', async () => {
+  const origHttpPort = process.env.HTTP_PORT;
+  const origAllowRelay = process.env.CHROME_CONTROLLER_ALLOW_RELAY;
+  const origSocket = process.env.CHROME_CONTROLLER_SOCKET;
+
+  delete process.env.HTTP_PORT;
+  delete process.env.CHROME_CONTROLLER_ALLOW_RELAY;
+  process.env.CHROME_CONTROLLER_SOCKET = '/tmp/nonexistent-socket-' + Date.now() + '.sock';
+
+  try {
+    await assert.rejects(
+      () => sendCommand('queryTabs'),
+      (err: Error) => {
+        assert.ok(err.message.includes('NATIVE_IPC_UNAVAILABLE'));
+        return true;
+      }
+    );
+  } finally {
+    if (origHttpPort !== undefined) process.env.HTTP_PORT = origHttpPort;
+    else delete process.env.HTTP_PORT;
+    if (origAllowRelay !== undefined) process.env.CHROME_CONTROLLER_ALLOW_RELAY = origAllowRelay;
+    else delete process.env.CHROME_CONTROLLER_ALLOW_RELAY;
+    if (origSocket !== undefined) process.env.CHROME_CONTROLLER_SOCKET = origSocket;
+    else delete process.env.CHROME_CONTROLLER_SOCKET;
+  }
+});
+
+test('sendCommand executes successfully over Native Messaging IPC socket', async () => {
+  if (process.platform === 'win32') return;
+
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-ipc-test-'));
+  const testSocket = path.join(tmpBase, 'test.sock');
+  const origSocket = process.env.CHROME_CONTROLLER_SOCKET;
+  process.env.CHROME_CONTROLLER_SOCKET = testSocket;
+
+  const server = net.createServer((client) => {
+    let buf = '';
+    client.on('data', (chunk) => {
+      buf += chunk.toString('utf8');
+      if (buf.includes('\n')) {
+        const parsed = JSON.parse(buf.trim());
+        client.write(JSON.stringify({ success: true, result: { echo: parsed.action, tabs: [{ id: 42 }] } }) + '\n');
+        client.end();
+      }
+    });
+  });
+
+  await new Promise<void>((resolve) => server.listen(testSocket, () => resolve()));
+
+  try {
+    const result = await sendCommand('queryTabs', { url: 'https://ipc.test' });
+    assert.deepStrictEqual(result, { echo: 'queryTabs', tabs: [{ id: 42 }] });
+  } finally {
+    server.close();
+    if (origSocket !== undefined) process.env.CHROME_CONTROLLER_SOCKET = origSocket;
+    else delete process.env.CHROME_CONTROLLER_SOCKET;
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('sendCommand falls back to HTTP relay when CHROME_CONTROLLER_ALLOW_RELAY=1 and IPC is down', async () => {
+  const origHttpPort = process.env.HTTP_PORT;
+  const origAllowRelay = process.env.CHROME_CONTROLLER_ALLOW_RELAY;
+  const origSocket = process.env.CHROME_CONTROLLER_SOCKET;
+  const origApiKey = process.env.API_KEY;
+
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+    req.on('end', () => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, result: { fallbackSuccess: true } }));
+    });
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const port = (server.address() as net.AddressInfo).port;
+
+  process.env.HTTP_PORT = String(port);
+  process.env.API_KEY = 'test-key';
+  process.env.CHROME_CONTROLLER_ALLOW_RELAY = '1';
+  process.env.CHROME_CONTROLLER_SOCKET = '/tmp/nonexistent-relay-socket-' + Date.now() + '.sock';
+
+  try {
+    const result = await sendCommand('queryTabs');
+    assert.deepStrictEqual(result, { fallbackSuccess: true });
+  } finally {
+    server.close();
+    if (origHttpPort !== undefined) process.env.HTTP_PORT = origHttpPort;
+    else delete process.env.HTTP_PORT;
+    if (origAllowRelay !== undefined) process.env.CHROME_CONTROLLER_ALLOW_RELAY = origAllowRelay;
+    else delete process.env.CHROME_CONTROLLER_ALLOW_RELAY;
+    if (origSocket !== undefined) process.env.CHROME_CONTROLLER_SOCKET = origSocket;
+    else delete process.env.CHROME_CONTROLLER_SOCKET;
+    if (origApiKey !== undefined) process.env.API_KEY = origApiKey;
+    else delete process.env.API_KEY;
+  }
+});
+
+test('sendCommand dispatches getConsoleLogs and cleanupManagedTabs over IPC', async () => {
+  if (process.platform === 'win32') return;
+
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-ipc-actions-'));
+  const testSocket = path.join(tmpBase, 'test.sock');
+  const origSocket = process.env.CHROME_CONTROLLER_SOCKET;
+  process.env.CHROME_CONTROLLER_SOCKET = testSocket;
+
+  let lastAction = '';
+  let lastParams: any = null;
+
+  const server = net.createServer((client) => {
+    let buf = '';
+    client.on('data', (chunk) => {
+      buf += chunk.toString('utf8');
+      if (buf.includes('\n')) {
+        const parsed = JSON.parse(buf.trim());
+        lastAction = parsed.action;
+        lastParams = parsed;
+        client.write(JSON.stringify({ success: true, result: { handled: parsed.action } }) + '\n');
+        client.end();
+      }
+    });
+  });
+
+  await new Promise<void>((resolve) => server.listen(testSocket, () => resolve()));
+
+  try {
+    const logsResult = await sendCommand('getConsoleLogs', { tabId: 10, timeoutMs: 1500 });
+    assert.strictEqual(lastAction, 'getConsoleLogs');
+    assert.strictEqual(lastParams.timeoutMs, 1500);
+    assert.deepStrictEqual(logsResult, { handled: 'getConsoleLogs' });
+
+    const cleanupResult = await sendCommand('cleanupManagedTabs', { closeTabs: true, windowId: 5 });
+    assert.strictEqual(lastAction, 'cleanupManagedTabs');
+    assert.strictEqual(lastParams.closeTabs, true);
+    assert.strictEqual(lastParams.windowId, 5);
+    assert.deepStrictEqual(cleanupResult, { handled: 'cleanupManagedTabs' });
+  } finally {
+    server.close();
+    if (origSocket !== undefined) process.env.CHROME_CONTROLLER_SOCKET = origSocket;
+    else delete process.env.CHROME_CONTROLLER_SOCKET;
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
 

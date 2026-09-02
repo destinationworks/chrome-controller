@@ -12,13 +12,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
+import { getSocketPath } from './native-host.js';
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8898';
 const DEFAULT_API_KEY = 'B3C65095-74E1-4F48-9EBB-64F5DD6AB078';
 const DISCOVERY_DIR = path.join(os.homedir(), '.chrome-controller');
-const SOCKET_PATH = process.platform === 'win32'
-  ? '\\\\.\\pipe\\chrome-controller-ipc'
-  : '/tmp/chrome-controller.sock';
+const SOCKET_PATH = getSocketPath();
 
 function readDiscovery(instance: string): { httpPort: number; apiKey: string } | null {
   try {
@@ -70,8 +69,9 @@ function textResult(value: unknown) {
 }
 
 function sendIpcRequest(payload: Record<string, unknown>, timeoutMs = 10000): Promise<ChromeResponse> {
+  const socketPath = getSocketPath();
   return new Promise((resolve, reject) => {
-    const client = net.connect(SOCKET_PATH, () => {
+    const client = net.connect(socketPath, () => {
       client.write(JSON.stringify(payload) + '\n');
     });
 
@@ -103,38 +103,57 @@ function sendIpcRequest(payload: Record<string, unknown>, timeoutMs = 10000): Pr
 }
 
 async function chromeRequest(payload: ChromeAction | Record<string, unknown>, signal?: AbortSignal): Promise<ChromeResponse> {
-  if (process.env.NODE_ENV !== 'test') {
+  const allowRelay = process.env.CHROME_CONTROLLER_ALLOW_RELAY === '1' || Boolean(process.env.CHROME_CONTROLLER_URL) || Boolean(process.env.HTTP_PORT);
+  const socketPath = getSocketPath();
+
+  if (process.env.NODE_ENV !== 'test' && !process.env.CHROME_CONTROLLER_URL) {
     try {
       return await sendIpcRequest(payload as Record<string, unknown>);
-    } catch {
-      // Fall back to HTTP relay server
+    } catch (ipcErr) {
+      if (!allowRelay) {
+        throw new Error(
+          `NATIVE_IPC_UNAVAILABLE: Native Messaging IPC at ${socketPath} is unavailable (${(ipcErr as Error).message}). ` +
+          `Zero-ports Native Messaging is the primary protocol. Fallback to network relay requires explicit activation (set CHROME_CONTROLLER_ALLOW_RELAY=1 or CHROME_CONTROLLER_URL).`
+        );
+      }
+      console.error(`[chrome-controller-pi] Native Messaging IPC failed (${(ipcErr as Error).message}), falling back to HTTP relay...`);
     }
   }
 
   const response = await fetch(baseUrl(), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey(),
-      },
-      body: JSON.stringify(payload),
-      signal,
-    });
-    const data = (await response.json()) as ChromeResponse;
-    if (!response.ok && !data.success) {
-      throw new Error(data.error ?? `Chrome Controller returned HTTP ${response.status}`);
-    }
-    return data;
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey(),
+    },
+    body: JSON.stringify(payload),
+    signal,
+  });
+  const data = (await response.json()) as ChromeResponse;
+  if (!response.ok && !data.success) {
+    throw new Error(data.error ?? `Chrome Controller returned HTTP ${response.status}`);
+  }
+  return data;
 }
 
 async function chromeHealth(signal?: AbortSignal): Promise<ChromeResponse> {
-  if (process.env.NODE_ENV !== 'test') {
+  const allowRelay = process.env.CHROME_CONTROLLER_ALLOW_RELAY === '1' || Boolean(process.env.CHROME_CONTROLLER_URL) || Boolean(process.env.HTTP_PORT);
+  const socketPath = getSocketPath();
+
+  if (process.env.NODE_ENV !== 'test' && !process.env.CHROME_CONTROLLER_URL) {
     try {
       const ipcRes = await sendIpcRequest({ action: 'queryTabs' });
       if (ipcRes.success) {
         return { success: true, extensionConnected: true, mode: 'NativeMessagingIPC' };
       }
-    } catch {}
+    } catch (ipcErr) {
+      if (!allowRelay) {
+        throw new Error(
+          `NATIVE_IPC_UNAVAILABLE: Native Messaging IPC at ${socketPath} is unavailable (${(ipcErr as Error).message}). ` +
+          `Zero-ports Native Messaging is the primary protocol. Fallback to network relay requires explicit activation.`
+        );
+      }
+    }
   }
 
   const response = await fetch(`${baseUrl()}/health`, { signal });
@@ -147,6 +166,7 @@ async function chromeHealth(signal?: AbortSignal): Promise<ChromeResponse> {
 
 function debuggerBatch(tabId: number, actions: ChromeAction[]) {
   return {
+    action: 'batch',
     mode: 'sequential',
     actions: [
       { action: 'ensureDebugger', tabId },

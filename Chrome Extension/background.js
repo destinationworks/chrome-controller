@@ -33,6 +33,7 @@ function connectNative() {
     nativePort.onDisconnect.addListener(() => {
       console.log('Native Messaging host disconnected:', chrome.runtime.lastError?.message);
       nativePort = null;
+      scheduleReconnect();
       // Fallback to WebSocket if native host is unavailable
       connectWs();
     });
@@ -131,10 +132,10 @@ function sendSocketResponse(id, payload) {
   }
 }
 
-async function sendTabMessage(tabId, message) {
+async function sendTabMessage(tabId, message, options = { frameId: 0 }) {
   if (!tabId) return null;
   try {
-    return await chrome.tabs.sendMessage(tabId, message);
+    return await chrome.tabs.sendMessage(tabId, message, options);
   } catch (err) {
     return null;
   }
@@ -249,21 +250,25 @@ async function setControlledTab(tabId, reason = 'targeted') {
   controlledTabId = tabId;
 
   if (previousTabId && previousTabId !== tabId) {
-    await releaseControlledTab(previousTabId, reason);
+    await releaseControlledTab(previousTabId, 'switchedTab');
   }
 
-  const groupId = await ensureControlledTabGroup(tabId);
+  await ensureControlledTabGroup(tabId);
   await sendTabMessage(tabId, {
     action: 'setControllerState',
     selected: true,
-    status: 'selected',
+    status: 'targeted',
     reason,
-    tab: await getTabInfo(tabId),
-    group: {
-      id: groupId,
-      title: CONTROLLED_GROUP_TITLE,
-      color: CONTROLLED_GROUP_COLOR,
-    },
+  });
+}
+
+function visualizeAction(tabId, actionType, detail = '', options = {}) {
+  if (!tabId) return;
+  return sendTabMessage(tabId, {
+    action: 'visualizeAction',
+    type: actionType,
+    detail,
+    sound: options.sound !== false,
   });
 }
 
@@ -323,12 +328,7 @@ async function sendAnimatedInsertText(tabId, commandParams = {}) {
       'Input.insertText',
       { text: char }
     );
-    await sendTabMessage(tabId, {
-      action: 'visualizeAction',
-      type: 'insertText',
-      detail: char,
-      sound: commandParams.sound !== false,
-    });
+    await visualizeAction(tabId, 'insertText', char, { sound: commandParams.sound !== false });
     await sleep(delayMs + Math.round(Math.random() * jitterMs));
     if (char === ' ' || char === '\n' || /[.,!?;:]/.test(char)) {
       await sleep(Math.round(delayMs * 0.65));
@@ -342,6 +342,35 @@ function scriptBodyToRuntimeExpression(funcBody) {
   return `(() => { ${funcBody || ''} })()`;
 }
 
+const ALLOWED_BATCH_ACTIONS = new Set([
+  'createTab',
+  'queryTabs',
+  'selectTab',
+  'removeTab',
+  'updateTab',
+  'executeScript',
+  'clickSelector',
+  'fillSelector',
+  'selectOption',
+  'snapshotElements',
+  'getPageErrors',
+  'captureScreenshot',
+  'captureVideo',
+  'releaseTab',
+  'ensureDebugger',
+  'attachDebugger',
+  'detachDebugger',
+  'visualizeAction',
+  'evaluateOnPage',
+  'clickElement',
+  'typeText',
+  'navigate',
+  'click',
+  'type',
+  'getConsoleLogs',
+  'cleanupManagedTabs',
+]);
+
 async function runBatch(actions, options = {}) {
   if (!Array.isArray(actions)) {
     throw new Error('Batch action requires actions array');
@@ -352,6 +381,12 @@ async function runBatch(actions, options = {}) {
   const normalized = actions.map((item, index) => {
     if (!item || typeof item !== 'object' || typeof item.action !== 'string') {
       throw new Error(`Batch item ${index} is missing action`);
+    }
+    if (item.action === 'batch') {
+      throw new Error(`Batch item ${index} cannot be a nested batch`);
+    }
+    if (!ALLOWED_BATCH_ACTIONS.has(item.action)) {
+      throw new Error(`Batch item ${index} specifies disallowed action "${item.action}"`);
     }
     const { action, ...params } = item;
     return { action, params };
@@ -618,12 +653,12 @@ async function handleWsMessage(message) {
 }
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
-  const payload = JSON.stringify({ event: 'debuggerEvent', source, method, params });
+  const eventObj = { event: 'debuggerEvent', source, method, params };
   if (nativePort) {
-    nativePort.postMessage(payload);
+    nativePort.postMessage(eventObj);
   }
   if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(payload);
+    socket.send(JSON.stringify(eventObj));
   }
 });
 

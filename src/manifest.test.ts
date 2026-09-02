@@ -13,6 +13,7 @@ const backgroundScript = await readFile(path.join(extensionDir, 'background.js')
 test('replacement package version is synchronized and newer than the rejected draft', () => {
   assert.equal(manifest.version, packageMetadata.version);
   assert.notEqual(manifest.version, '1.1.0');
+  assert.notEqual(manifest.version, '1.1.1');
 });
 
 test('extension uses the requested Web Store display name', () => {

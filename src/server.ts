@@ -90,10 +90,50 @@ export interface ChromeControllerServer {
   apiKey: string;
   instance: string;
   isExtensionReady: () => boolean;
+  ready: Promise<{ httpPort: number; wsPort: number }>;
   close: () => void;
 }
 
 // ── Factory ────────────────────────────────────────────────────────────────────
+
+export const ALLOWED_BATCH_ACTIONS = new Set([
+  'createTab',
+  'queryTabs',
+  'selectTab',
+  'removeTab',
+  'updateTab',
+  'executeScript',
+  'clickSelector',
+  'fillSelector',
+  'selectOption',
+  'snapshotElements',
+  'getPageErrors',
+  'captureScreenshot',
+  'captureVideo',
+  'releaseTab',
+  'ensureDebugger',
+  'attachDebugger',
+  'detachDebugger',
+  'visualizeAction',
+  'evaluateOnPage',
+  'clickElement',
+  'typeText',
+  'navigate',
+  'click',
+  'type',
+  'getConsoleLogs',
+  'cleanupManagedTabs',
+]);
+
+function isLoopbackAddress(addr?: string): boolean {
+  if (!addr) return false;
+  return (
+    addr === '127.0.0.1' ||
+    addr === '::1' ||
+    addr === '::ffff:127.0.0.1' ||
+    addr === 'localhost'
+  );
+}
 
 export function createChromeControllerServer(config: ServerConfig = {}): ChromeControllerServer {
   const apiKey = config.apiKey ?? (process.env.API_KEY || DEFAULT_API_KEY);
@@ -113,10 +153,17 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
 
   // ── WebSocket Server ─────────────────────────────────────────────────────────
 
-  const wss = new WebSocketServer({ port: wsPortHint });
+  const wss = new WebSocketServer({ port: wsPortHint, host: '127.0.0.1' });
 
   wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
-    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+    const remoteAddr = req.socket.remoteAddress;
+    if (!isLoopbackAddress(remoteAddr)) {
+      console.error(`Rejected non-loopback WebSocket connection from ${remoteAddr}`);
+      ws.close(1008, 'Forbidden: Non-loopback connection rejected');
+      return;
+    }
+
+    const url = new URL(req.url ?? '/', `http://${req.headers.host || '127.0.0.1'}`);
     if (url.searchParams.get('key') !== apiKey) {
       console.log('Rejected WebSocket connection: Invalid API key');
       ws.close(1008, 'Invalid API key');
@@ -191,6 +238,7 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
           reject(new Error(`Request timed out after ${timeoutMs} ms`));
         }
       }, timeoutMs);
+      timer.unref();
 
       pendingRequests.set(id, {
         resolve: (value) => { clearTimeout(timer); resolve(value); },
@@ -212,6 +260,10 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
     if (!item || typeof item !== 'object') throw new Error(`Batch item ${index} must be an object`);
     const obj = item as Record<string, unknown>;
     if (!obj.action || typeof obj.action !== 'string') throw new Error(`Batch item ${index} is missing action`);
+    if (obj.action === 'batch') throw new Error(`Batch item ${index} cannot be a nested batch`);
+    if (!ALLOWED_BATCH_ACTIONS.has(obj.action)) {
+      throw new Error(`Batch item ${index} specifies disallowed action "${obj.action}"`);
+    }
     const { action, ...params } = obj;
     return { action, params };
   }
@@ -257,27 +309,40 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
   function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
       let body = '';
+      let rejected = false;
       req.on('data', (chunk: Buffer) => {
+        if (rejected) return;
         body += chunk.toString();
         if (Buffer.byteLength(body) > MAX_BODY_BYTES) {
+          rejected = true;
+          req.pause();
           reject(new Error(`Request body exceeds ${MAX_BODY_BYTES} bytes`));
-          req.destroy();
         }
       });
       req.on('end', () => {
+        if (rejected) return;
         try { resolve(body ? JSON.parse(body) as Record<string, unknown> : {}); }
         catch { reject(new Error('Invalid JSON payload')); }
       });
-      req.on('error', reject);
+      req.on('error', (err) => {
+        if (!rejected) reject(err);
+      });
     });
   }
 
   // ── HTTP Server ──────────────────────────────────────────────────────────────
 
   const httpServer = http.createServer(async (req, res) => {
+    const remoteAddr = req.socket.remoteAddress;
+    if (!isLoopbackAddress(remoteAddr)) {
+      console.error(`Rejected non-loopback HTTP request from ${remoteAddr}`);
+      sendJson(res, 403, { success: false, error: 'Forbidden: Non-loopback connection rejected' });
+      return;
+    }
+
     // Resolve actual ports after listen
-    const actualHttpPort = (httpServer.address() as { port: number }).port;
-    const actualWsPort = (wss.address() as { port: number }).port;
+    const actualHttpPort = (httpServer.address() as { port: number })?.port ?? httpPortHint;
+    const actualWsPort = (wss.address() as { port: number })?.port ?? wsPortHint;
 
     if (req.method === 'GET' && req.url === '/health') {
       sendJson(res, 200, {
@@ -336,14 +401,14 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
     }
   });
 
-  // Start listening — port 0 means OS picks a free port
-  httpServer.listen(httpPortHint, () => {
+  // Start listening — strictly on 127.0.0.1
+  httpServer.listen(httpPortHint, '127.0.0.1', () => {
     const actualHttpPort = (httpServer.address() as { port: number }).port;
     const actualWsPort = (wss.address() as { port: number }).port;
 
-    console.log(`[${instance}] HTTP API  → http://localhost:${actualHttpPort}`);
-    console.log(`[${instance}] WebSocket → ws://localhost:${actualWsPort}`);
-    console.log(`[${instance}] Health    → curl http://localhost:${actualHttpPort}/health`);
+    console.log(`[${instance}] HTTP API  → http://127.0.0.1:${actualHttpPort}`);
+    console.log(`[${instance}] WebSocket → ws://127.0.0.1:${actualWsPort}`);
+    console.log(`[${instance}] Health    → curl http://127.0.0.1:${actualHttpPort}/health`);
 
     if (shouldWriteDiscovery) {
       writeDiscovery(instance, {
@@ -357,6 +422,36 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
     }
   });
 
+  const ready = new Promise<{ httpPort: number; wsPort: number }>((resolve) => {
+    let httpReady = Boolean(httpServer.listening);
+    let wsReady = Boolean(wss.address());
+
+    const check = () => {
+      if (httpReady && wsReady) {
+        const actualHttpPort = (httpServer.address() as { port: number })?.port ?? httpPortHint;
+        const actualWsPort = (wss.address() as { port: number })?.port ?? wsPortHint;
+        resolve({ httpPort: actualHttpPort, wsPort: actualWsPort });
+      }
+    };
+
+    if (httpReady && wsReady) {
+      check();
+    } else {
+      if (!httpReady) {
+        httpServer.once('listening', () => {
+          httpReady = true;
+          check();
+        });
+      }
+      if (!wsReady) {
+        wss.once('listening', () => {
+          wsReady = true;
+          check();
+        });
+      }
+    }
+  });
+
   return {
     wss,
     server: httpServer,
@@ -365,9 +460,20 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
     apiKey,
     instance,
     isExtensionReady,
+    ready,
     close: () => {
       if (shouldWriteDiscovery) removeDiscovery(instance);
+      for (const [, req] of pendingRequests) {
+        try { req.reject(new Error('Server closed')); } catch (_) {}
+      }
+      pendingRequests.clear();
+      for (const client of wss.clients) {
+        try { client.terminate(); } catch (_) {}
+      }
       wss.close();
+      if (typeof (httpServer as any).closeAllConnections === 'function') {
+        (httpServer as any).closeAllConnections();
+      }
       httpServer.close();
     },
   };
@@ -375,7 +481,7 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
 
 // ── Entrypoint ────────────────────────────────────────────────────────────────
 
-const isMain = process.argv[1]?.endsWith('server.js') || process.argv[1]?.endsWith('server.ts');
+const isMain = /(?:^|[\\/])server\.(?:js|ts)$/.test(process.argv[1] || '');
 if (isMain) {
   const srv = createChromeControllerServer();
 

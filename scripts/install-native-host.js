@@ -9,31 +9,35 @@ const rootDir = path.resolve(__dirname, '..');
 
 const extensionId = process.argv[2];
 
-const nativeHostsDir = path.join(
-  os.homedir(),
-  'Library/Application Support/Google/Chrome/NativeMessagingHosts'
-);
+if (!extensionId || !/^[a-p]{32}$/.test(extensionId)) {
+  console.error('Error: You must provide a valid 32-character Chrome extension ID.');
+  console.error('Usage: npm run install-host <extension-id>');
+  console.error('Example: npm run install-host gocbenlgkgeaiifofilndbnaeigpplca');
+  process.exit(1);
+}
+
+const nativeHostsDir = process.platform === 'darwin'
+  ? path.join(os.homedir(), 'Library/Application Support/Google/Chrome/NativeMessagingHosts')
+  : path.join(os.homedir(), '.config/google-chrome/NativeMessagingHosts');
 
 fs.mkdirSync(nativeHostsDir, { recursive: true });
 
 const launcherPath = path.join(rootDir, 'scripts/native-host-launcher.sh');
-
-const origins = [];
-
-if (extensionId) {
-  origins.push(`chrome-extension://${extensionId}/`);
-}
+try {
+  fs.chmodSync(launcherPath, 0o755);
+} catch { /* ignore */ }
 
 const manifestContent = {
   name: 'com.dst.chrome_controller',
   description: 'Chrome Controller Native Messaging Host for AI Agents',
   path: launcherPath,
   type: 'stdio',
-  allowed_origins: origins
+  allowed_origins: [`chrome-extension://${extensionId}/`],
 };
 
 const targetPath = path.join(nativeHostsDir, 'com.dst.chrome_controller.json');
 fs.writeFileSync(targetPath, JSON.stringify(manifestContent, null, 2), 'utf8');
 
 console.log(`Native Messaging Host manifest installed to:\n  ${targetPath}`);
+console.log(`Allowed extension origin:\n  chrome-extension://${extensionId}/`);
 console.log(`Points to launcher:\n  ${launcherPath}`);

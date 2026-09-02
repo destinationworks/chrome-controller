@@ -242,8 +242,9 @@ function snapshotElements(options = {}) {
   }
 
   const selectors = [
-    'button', 'a[href]', 'input', 'textarea', 'select',
+    'button', 'a[href]', 'input', 'textarea', 'select', 'summary',
     '[role="button"]', '[role="link"]', '[role="checkbox"]', '[role="menuitem"]',
+    '[role="tab"]', '[role="option"]', '[role="switch"]', '[role="combobox"]', '[role="treeitem"]',
     '[onclick]', '[contenteditable="true"]'
   ].join(',');
 
@@ -344,17 +345,24 @@ function fillSelector(options = {}) {
   updateCursor(rect.left + 10, rect.top + rect.height / 2, 'Filling text');
 
   el.focus();
+  const text = options.text || '';
   if ('value' in el) {
-    el.value = options.text || '';
+    const proto = Object.getPrototypeOf(el);
+    const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (descriptor && descriptor.set) {
+      descriptor.set.call(el, text);
+    } else {
+      el.value = text;
+    }
   } else {
-    el.textContent = options.text || '';
+    el.textContent = text;
   }
 
   el.dispatchEvent(new Event('input', { bubbles: true }));
   el.dispatchEvent(new Event('change', { bubbles: true }));
 
-  logAction('Fill selector', options.text);
-  return { success: true, text: options.text };
+  logAction('Fill selector', text);
+  return { success: true, text };
 }
 
 function selectOption(options = {}) {
