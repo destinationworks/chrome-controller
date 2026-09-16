@@ -4,6 +4,11 @@
   "version": "1.2.0",
   "description": "Local browser control bridge for AI agents via Native Messaging",
   "author": "dst.works@gmail.com",
+  "homepage_url": "https://github.com/dst0/chrome-controller",
+  "action": {
+    "default_title": "p agent extension",
+    "default_popup": "popup.html"
+  },
   "icons": {
     "16": "icon16.png",
     "48": "icon48.png",

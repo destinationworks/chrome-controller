@@ -20,6 +20,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     sendResponse({ success: true, hidden: overlayHidden });
   } else if (request.action === 'getOverlayState') {
     sendResponse({ success: true, overlayHidden, controlledTabId });
+  } else if (request.action === 'getConnectionState') {
+    sendResponse({
+      success: true,
+      nativeConnected: Boolean(nativePort),
+      wsConnected: Boolean(socket && socket.readyState === WebSocket.OPEN),
+      extensionId: chrome.runtime.id,
+      controlledTabId,
+    });
   }
 });
 
