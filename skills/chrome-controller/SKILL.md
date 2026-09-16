@@ -7,6 +7,15 @@ description: Use Chrome Controller from Pi to inspect tabs, open/select a contro
 
 Use this skill when the user asks you to control Chrome, inspect browser tabs, click or type in a page, capture screenshots, evaluate JavaScript, read console logs, or run browser actions through the local Chrome Controller extension.
 
+> [!IMPORTANT]
+> **Primary Recommendation for Browser-Only Tasks**:
+> Whenever an operation only requires interacting with Google Chrome or web pages (e.g. navigation, clicking DOM elements, form input, scraping, page screenshots, evaluating JS), **ALWAYS prefer and use `chrome-controller`** rather than OS-level automation (`computer-controller`).
+> 
+> **Why:**
+> - `chrome-controller` acts directly at the browser/CDP level inside a dedicated AI tab group (`🤖 AI Tool`).
+> - It does NOT hijack or move the user's physical mouse cursor, steal OS window focus, or emit global system keyboard events.
+> - This completely eliminates race conditions and input conflicts with the real human user actively using the desktop, as well as conflicts with other background tasks.
+
 ## Required Components
 
 1. **Chrome Extension** — load `Chrome Extension/` as an unpacked MV3 extension in Chrome.
@@ -106,4 +115,6 @@ No port or API key environment variables are required when using Native Messagin
 
 - Coordinates are viewport coordinates in the target tab.
 - Restricted pages (`chrome://`) may not show the visual overlay.
+- **Secrets:** Do not pass passwords, tokens, recovery material, or other secrets to `chrome_fill` or animated `chrome_type_text`. The current content script echoes inserted text into its in-page action feed, and `chrome_fill` returns the text in its result. Prefer the site's/password manager's own autofill flow. Otherwise stop and implement a secret-safe path that neither renders nor returns the value. Reload the target page immediately if a secret is ever inserted through the unsafe path.
+- If `chrome_evaluate` or another CDP-backed action fails with `Cannot access a chrome-extension:// URL of different extension`, do not treat that alone as a Native Messaging outage and do not enable the network relay. Re-run `chrome_controller_health`, then use the content-script path (`chrome_snapshot_elements`, `chrome_click`, and `chrome_get_page_errors`) when those calls still succeed. Use `chrome_fill` only for non-secret text. This can occur when another extension owns the debugger or page attachment even though ordinary tab-scoped controls remain safe and functional.
 - The extension auto-visualizes CDP mouse and text commands; do not call visual-only actions separately.

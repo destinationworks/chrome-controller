@@ -23,6 +23,11 @@ The controller supports two operational modes:
    curl -s http://127.0.0.1:8898/health
    ```
 
+## Scope & Priority: Browser-Only Automation
+
+- Always prioritize and recommend `chrome-controller` whenever a task only requires interacting with Google Chrome or web pages (navigation, clicking DOM elements, form input, scraping, page screenshots, evaluating JS).
+- Interacting via the Chrome Extension / CDP confines automation strictly to dedicated managed tabs (`🤖 AI Tool`), completely avoiding physical cursor movement, OS focus theft, or keyboard interference with the real user or background desktop tasks.
+
 ## MCP Tool Auto-Execution
 
 - All `chrome-controller` MCP tools (`chrome_*`) are pre-approved in global (`~/.gemini/config/mcp_config.json`), IDE (`~/.gemini/antigravity-ide/mcp_config.json`, `.vscode/settings.json`), and project (`.agents/mcp_config.json`) configurations.
