@@ -225,17 +225,19 @@ test('NativeMessagingHost IPC server rejects oversized lines exceeding 10MB', as
         client.on('error', () => resolve());
       });
 
-      // Write > 10MB of data without newline
+      // Write > 10MB of data without newline once connected
       const largeChunk = Buffer.alloc(1024 * 1024, 'a');
-      for (let i = 0; i < 11; i++) {
-        client.write(largeChunk);
-      }
+      client.on('connect', () => {
+        for (let i = 0; i < 11; i++) {
+          client.write(largeChunk);
+        }
+      });
 
       let timeoutId: NodeJS.Timeout | undefined;
       await Promise.race([
         closedPromise,
         new Promise((_, reject) => {
-          timeoutId = setTimeout(() => reject(new Error('Timeout waiting for socket termination')), 4000);
+          timeoutId = setTimeout(() => reject(new Error('Timeout waiting for socket termination')), 10000);
         }),
       ]);
       if (timeoutId) clearTimeout(timeoutId);

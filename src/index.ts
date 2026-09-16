@@ -17,7 +17,6 @@ import { getSocketPath } from './native-host.js';
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8898';
 const DEFAULT_API_KEY = 'B3C65095-74E1-4F48-9EBB-64F5DD6AB078';
 const DISCOVERY_DIR = path.join(os.homedir(), '.chrome-controller');
-const SOCKET_PATH = getSocketPath();
 
 function readDiscovery(instance: string): { httpPort: number; apiKey: string } | null {
   try {

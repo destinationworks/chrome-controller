@@ -304,8 +304,8 @@ test('sendCommand falls back to HTTP relay when CHROME_CONTROLLER_ALLOW_RELAY=1 
   const origApiKey = process.env.API_KEY;
 
   const server = http.createServer((req, res) => {
-    let body = '';
-    req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+    let _body = '';
+    req.on('data', (chunk: Buffer) => { _body += chunk.toString(); });
     req.on('end', () => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, result: { fallbackSuccess: true } }));

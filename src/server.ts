@@ -464,11 +464,11 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
     close: () => {
       if (shouldWriteDiscovery) removeDiscovery(instance);
       for (const [, req] of pendingRequests) {
-        try { req.reject(new Error('Server closed')); } catch (_) {}
+        try { req.reject(new Error('Server closed')); } catch {}
       }
       pendingRequests.clear();
       for (const client of wss.clients) {
-        try { client.terminate(); } catch (_) {}
+        try { client.terminate(); } catch {}
       }
       wss.close();
       if (typeof (httpServer as any).closeAllConnections === 'function') {

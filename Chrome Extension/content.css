@@ -91,7 +91,8 @@
     max-height 160ms ease,
     padding 160ms ease,
     transform 160ms ease,
-    border-color 160ms ease;
+    border-color 160ms ease,
+    opacity 160ms ease;
 }
 
 .chrome-controller-selected .chrome-controller-hud {
@@ -116,6 +117,8 @@
   font-weight: 750;
   line-height: 1.2;
   text-transform: uppercase;
+  cursor: grab;
+  user-select: none;
 }
 
 .chrome-controller-status-dot {
@@ -301,12 +304,39 @@
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
+  user-select: none;
 }
 
 .chrome-controller-settings-item input[type="checkbox"] {
   accent-color: #70e9ff;
   cursor: pointer;
 }
+
+.chrome-controller-kbd {
+  display: inline-block;
+  margin-left: auto;
+  padding: 1px 5px;
+  border: 1px solid rgba(112, 233, 255, 0.3);
+  border-radius: 4px;
+  background: rgba(13, 30, 42, 0.7);
+  color: rgba(185, 227, 240, 0.9);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+/* ── Hidden Overlay State ─────────────────────────────────────────────────── */
+#chrome-controller-overlay-root.chrome-controller-hidden-overlay,
+#chrome-controller-overlay-root.chrome-controller-hidden-overlay * {
+  display: none !important;
+}
+
+body:has(#chrome-controller-overlay-root.chrome-controller-hidden-overlay) #chrome-controller-badges-container,
+html:has(#chrome-controller-overlay-root.chrome-controller-hidden-overlay) #chrome-controller-badges-container {
+  display: none !important;
+}
+
 
 .chrome-controller-cursor {
   position: fixed;

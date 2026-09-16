@@ -12,6 +12,17 @@ let socket = null;
 let nativePort = null;
 let controlledTabId = null;
 let controlledGroupIdsByWindow = new Map();
+let overlayHidden = false;
+
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'setOverlayHidden') {
+    overlayHidden = Boolean(request.hidden);
+    sendResponse({ success: true, hidden: overlayHidden });
+  } else if (request.action === 'getOverlayState') {
+    sendResponse({ success: true, overlayHidden, controlledTabId });
+  }
+});
+
 
 // ── Native Messaging ─────────────────────────────────────────────────────────
 
@@ -209,6 +220,7 @@ async function releaseControlledTab(tabId, reason = 'released') {
     selected: false,
     status: 'released',
     reason,
+    overlayHidden,
   });
   if (controlledTabId === tabId) {
     controlledTabId = null;
@@ -259,6 +271,7 @@ async function setControlledTab(tabId, reason = 'targeted') {
     selected: true,
     status: 'targeted',
     reason,
+    overlayHidden,
   });
 }
 
@@ -369,6 +382,8 @@ const ALLOWED_BATCH_ACTIONS = new Set([
   'type',
   'getConsoleLogs',
   'cleanupManagedTabs',
+  'setOverlayHidden',
+  'getOverlayState',
 ]);
 
 async function runBatch(actions, options = {}) {
@@ -632,6 +647,17 @@ async function executeAction(action, params = {}) {
     result = { logs: collected, count: collected.length };
   } else if (action === 'cleanupManagedTabs') {
     result = await cleanupManagedTabs(params);
+  } else if (action === 'setOverlayHidden') {
+    overlayHidden = Boolean(params.hidden);
+    if (controlledTabId) {
+      await sendTabMessage(controlledTabId, {
+        action: 'setOverlayHidden',
+        hidden: overlayHidden,
+      });
+    }
+    result = { success: true, hidden: overlayHidden };
+  } else if (action === 'getOverlayState') {
+    result = { success: true, overlayHidden, controlledTabId };
   } else if (action === 'batch') {
     result = await runBatch(params.actions || params.commands, params);
   } else {

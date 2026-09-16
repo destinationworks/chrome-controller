@@ -1,6 +1,6 @@
 {
   "name": "chrome-controller",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "Local Chrome control bridge — Pi/AGY extension + MCP server + Native Messaging IPC",
   "type": "module",
   "main": "dist/index.js",
@@ -16,7 +16,7 @@
     "generate-store-assets": "npm run generate-store-artwork && npm run capture-store-screenshot",
     "package": "npm run generate-icons && node scripts/package-extension.js",
     "mcp": "node dist/mcp.js",
-    "test": "NODE_ENV=test npx tsx --test src/native-host.test.ts src/server.test.ts src/index.test.ts src/mcp.test.ts src/store-assets.test.ts src/manifest.test.ts",
+    "test": "NODE_ENV=test npx tsx --test src/native-host.test.ts src/server.test.ts src/index.test.ts src/mcp.test.ts src/store-assets.test.ts src/manifest.test.ts src/content-overlay.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src test --max-warnings 0"
   },

@@ -3,6 +3,48 @@ const BADGE_CONTAINER_ID = 'chrome-controller-badges-container';
 const MAX_FEED_ITEMS = 5;
 const TITLE_PREFIX = '🤖 ';
 const ROBOT_FAVICON_ID = 'chrome-controller-robot-favicon';
+const STORAGE_KEY_HIDE_OVERLAY = 'chrome_controller_hide_overlay';
+const STORAGE_KEY_HUD_POS = 'chrome_controller_hud_pos';
+
+function getStoredOverlayHidden() {
+  try {
+    return sessionStorage.getItem(STORAGE_KEY_HIDE_OVERLAY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function setStoredOverlayHidden(hidden) {
+  try {
+    if (hidden) {
+      sessionStorage.setItem(STORAGE_KEY_HIDE_OVERLAY, 'true');
+    } else {
+      sessionStorage.removeItem(STORAGE_KEY_HIDE_OVERLAY);
+    }
+  } catch {
+    // Ignore storage errors on restricted origins
+  }
+}
+
+function getStoredHudPosition() {
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEY_HUD_POS);
+    if (raw) return JSON.parse(raw);
+  } catch {
+    // Ignore storage errors
+  }
+  return null;
+}
+
+function setStoredHudPosition(left, top) {
+  try {
+    if (left && top) {
+      sessionStorage.setItem(STORAGE_KEY_HUD_POS, JSON.stringify({ left, top }));
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
 
 const state = {
   cursor: { x: null, y: null },
@@ -14,7 +56,7 @@ const state = {
   audioMuted: true,
   lastSoundAt: 0,
   sparkleTimer: null,
-  overlayHidden: false,
+  overlayHidden: getStoredOverlayHidden(),
 };
 
 // ── Continuous Error Logging Ring Buffer ────────────────────────────────────
@@ -79,9 +121,10 @@ function ensureOverlay() {
         <span class="chrome-controller-status">Controller idle</span>
       </div>
       <div class="chrome-controller-settings">
-        <label class="chrome-controller-settings-item">
+        <label class="chrome-controller-settings-item" title="Toggle overlay visibility (Alt+O)">
           <input type="checkbox" class="chrome-controller-hide-toggle" />
           <span>Hide overlay</span>
+          <kbd class="chrome-controller-kbd">Alt+O</kbd>
         </label>
       </div>
       <div class="chrome-controller-tab">No controlled tab</div>
@@ -93,6 +136,20 @@ function ensureOverlay() {
 
   const mount = document.body || document.documentElement;
   mount.appendChild(root);
+
+  const storedPos = getStoredHudPosition();
+  if (storedPos && storedPos.left && storedPos.top) {
+    const hudEl = root.querySelector('.chrome-controller-hud');
+    if (hudEl) {
+      hudEl.style.left = storedPos.left;
+      hudEl.style.top = storedPos.top;
+      hudEl.style.right = 'auto';
+    }
+  }
+
+  if (state.overlayHidden) {
+    root.classList.add('chrome-controller-hidden-overlay');
+  }
   wireOverlayControls(root);
   return root;
 }
@@ -100,6 +157,51 @@ function ensureOverlay() {
 function wireOverlayControls(root) {
   if (root.dataset.chromeControllerControlsWired === 'true') return;
   root.dataset.chromeControllerControlsWired = 'true';
+
+  const hud = root.querySelector('.chrome-controller-hud');
+  if (hud) {
+    hud.addEventListener('click', (e) => e.stopPropagation());
+    hud.addEventListener('mousedown', (e) => e.stopPropagation());
+  }
+
+  const statusRow = root.querySelector('.chrome-controller-status-row');
+  if (statusRow && hud) {
+    statusRow.title = 'Drag to reposition HUD';
+    statusRow.addEventListener('mousedown', (e) => {
+      if (e.target.closest('button') || e.target.closest('input')) return;
+      const rect = hud.getBoundingClientRect();
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const startLeft = rect.left;
+      const startTop = rect.top;
+      statusRow.style.cursor = 'grabbing';
+      e.preventDefault();
+      e.stopPropagation();
+
+      const onMouseMove = (moveEvent) => {
+        const dx = moveEvent.clientX - startX;
+        const dy = moveEvent.clientY - startY;
+        const maxLeft = Math.max(0, window.innerWidth - rect.width);
+        const maxTop = Math.max(0, window.innerHeight - rect.height);
+        const newLeft = Math.max(0, Math.min(maxLeft, startLeft + dx));
+        const newTop = Math.max(0, Math.min(maxTop, startTop + dy));
+        hud.style.left = `${Math.round(newLeft)}px`;
+        hud.style.top = `${Math.round(newTop)}px`;
+        hud.style.right = 'auto';
+        hud.style.bottom = 'auto';
+      };
+
+      const onMouseUp = () => {
+        statusRow.style.cursor = 'grab';
+        window.removeEventListener('mousemove', onMouseMove, true);
+        window.removeEventListener('mouseup', onMouseUp, true);
+        setStoredHudPosition(hud.style.left, hud.style.top);
+      };
+
+      window.addEventListener('mousemove', onMouseMove, true);
+      window.addEventListener('mouseup', onMouseUp, true);
+    });
+  }
 
   const audioBtn = root.querySelector('.chrome-controller-audio-btn');
   if (audioBtn) {
@@ -111,6 +213,7 @@ function wireOverlayControls(root) {
 
   const hideToggle = root.querySelector('.chrome-controller-hide-toggle');
   if (hideToggle) {
+    hideToggle.checked = Boolean(state.overlayHidden);
     hideToggle.addEventListener('change', (e) => {
       e.stopPropagation();
       setOverlayHidden(e.target.checked);
@@ -187,7 +290,7 @@ function updateCursor(x, y, label) {
 }
 
 function spawnRipple(x, y, kind = 'click') {
-  if (x == null || y == null) return;
+  if (state.overlayHidden || x == null || y == null) return;
   const root = ensureOverlay();
   const ripple = document.createElement('div');
   ripple.className = `chrome-controller-ripple chrome-controller-ripple-${kind}`;
@@ -208,7 +311,27 @@ function setAudioMuted(muted) {
 
 function setOverlayHidden(hidden) {
   state.overlayHidden = Boolean(hidden);
+  setStoredOverlayHidden(state.overlayHidden);
   setRootClass('chrome-controller-hidden-overlay', state.overlayHidden);
+
+  const root = document.getElementById(ROOT_ID);
+  if (root) {
+    const toggle = root.querySelector('.chrome-controller-hide-toggle');
+    if (toggle && toggle.checked !== state.overlayHidden) {
+      toggle.checked = state.overlayHidden;
+    }
+  }
+
+  const badges = document.getElementById(BADGE_CONTAINER_ID);
+  if (badges) {
+    badges.style.display = state.overlayHidden ? 'none' : '';
+  }
+
+  try {
+    if (typeof chrome !== 'undefined' && chrome?.runtime?.sendMessage) {
+      chrome.runtime.sendMessage({ action: 'setOverlayHidden', hidden: state.overlayHidden }).catch(() => {});
+    }
+  } catch {}
 }
 
 function flashSelectedTab() {
@@ -221,7 +344,7 @@ function flashSelectedTab() {
 // ── Element Snapshotting & Ref Tagging ─────────────────────────────────────
 
 function snapshotElements(options = {}) {
-  const showOverlay = options.showOverlay !== false;
+  const showOverlay = options.showOverlay !== false && !state.overlayHidden;
 
   // Clear existing badge overlay container if present
   let badgeContainer = document.getElementById(BADGE_CONTAINER_ID);
@@ -380,6 +503,9 @@ function selectOption(options = {}) {
 // ── Message Listener ────────────────────────────────────────────────────────
 
 function handleControllerState(request) {
+  if (typeof request.overlayHidden === 'boolean') {
+    setOverlayHidden(request.overlayHidden);
+  }
   state.selected = Boolean(request.selected);
   setRootClass('chrome-controller-selected', state.selected);
   setTitleMarker(state.selected);
@@ -454,6 +580,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ success: true, ...res });
     } else if (request.action === 'getPageErrors') {
       sendResponse({ success: true, errors: capturedErrors, count: capturedErrors.length });
+    } else if (request.action === 'setOverlayHidden') {
+      setOverlayHidden(Boolean(request.hidden));
+      sendResponse({ success: true, hidden: state.overlayHidden });
+    } else if (request.action === 'getOverlayState') {
+      sendResponse({ success: true, overlayHidden: state.overlayHidden, selected: state.selected });
     } else {
       sendResponse({ success: false, error: `Unknown content action: ${request.action}` });
     }
@@ -462,3 +593,26 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
   return true;
 });
+
+// ── Global Keyboard Shortcuts ───────────────────────────────────────────────
+
+let shortcutsWired = false;
+function wireKeyboardShortcuts() {
+  if (shortcutsWired) return;
+  shortcutsWired = true;
+  window.addEventListener(
+    'keydown',
+    (e) => {
+      // Alt+O (or Option+O on macOS) toggles overlay visibility
+      if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'o' || e.key === 'O' || e.code === 'KeyO')) {
+        e.preventDefault();
+        e.stopPropagation();
+        setOverlayHidden(!state.overlayHidden);
+      }
+    },
+    true
+  );
+}
+
+wireKeyboardShortcuts();
+
