@@ -1,53 +1,47 @@
 import { WebSocket, WebSocketServer } from 'ws';
 import http from 'node:http';
-import fs from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
+import { timingSafeEqual } from 'node:crypto';
+import {
+  DISCOVERY_DIR,
+  DiscoveryInfo,
+  generateRelayApiKey,
+  normalizeInstanceName,
+  readDiscovery,
+  removeDiscovery,
+  validateRelayApiKey,
+  writeDiscovery,
+} from './discovery.js';
+
+export {
+  DISCOVERY_DIR,
+  readDiscovery,
+  removeDiscovery,
+  writeDiscovery,
+};
+export type { DiscoveryInfo };
 
 // ── Discovery file ─────────────────────────────────────────────────────────────
 // Each running server instance writes its actual ports here so agents can find them.
 // Default instance name is "default". Set CHROME_CONTROLLER_INSTANCE=<name> to
 // run multiple isolated instances simultaneously on the same machine.
 
-export const DISCOVERY_DIR = path.join(os.homedir(), '.chrome-controller');
-
-export interface DiscoveryInfo {
-  httpPort: number;
-  wsPort: number;
-  apiKey: string;
-  pid: number;
-  startedAt: string;
-}
-
-export function writeDiscovery(instance: string, info: DiscoveryInfo): void {
-  fs.mkdirSync(DISCOVERY_DIR, { recursive: true });
-  fs.writeFileSync(
-    path.join(DISCOVERY_DIR, `${instance}.json`),
-    JSON.stringify(info, null, 2)
-  );
-}
-
-export function readDiscovery(instance: string): DiscoveryInfo | null {
-  const file = path.join(DISCOVERY_DIR, `${instance}.json`);
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8')) as DiscoveryInfo;
-  } catch {
-    return null;
-  }
-}
-
-export function removeDiscovery(instance: string): void {
-  try { fs.unlinkSync(path.join(DISCOVERY_DIR, `${instance}.json`)); } catch { /* ignore */ }
-}
-
 // ── Defaults ──────────────────────────────────────────────────────────────────
 // Use 0 to let the OS pick a free port (recommended for multi-agent setups).
 // Set WS_PORT / HTTP_PORT env vars to pin specific ports if needed.
 
-export const DEFAULT_API_KEY = 'B3C65095-74E1-4F48-9EBB-64F5DD6AB078';
 export const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 export const DEFAULT_TIMEOUT_MS = 10000;
 export const DEFAULT_MAX_BATCH_ACTIONS = 50;
+const MAX_CONFIGURED_BODY_BYTES = 100 * 1024 * 1024;
+const MAX_REQUEST_TIMEOUT_MS = 120000;
+const MAX_CONFIGURED_BATCH_ACTIONS = 1000;
+
+function boundedInteger(value: unknown, label: string, minimum: number, maximum: number): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${label} must be an integer from ${minimum} to ${maximum}`);
+  }
+  return value;
+}
 
 export interface ServerConfig {
   wsPort?: number;        // 0 = OS-assigned free port (default)
@@ -135,17 +129,67 @@ function isLoopbackAddress(addr?: string): boolean {
   );
 }
 
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return normalized === '127.0.0.1' || normalized === 'localhost' || normalized === '[::1]' || normalized === '::1';
+}
+
+function hasAllowedHost(host: string | undefined): boolean {
+  if (!host) return false;
+  try {
+    return isLoopbackHostname(new URL(`http://${host}`).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function hasAllowedOrigin(origin: string | undefined): boolean {
+  if (!origin) return true;
+  try {
+    const parsed = new URL(origin);
+    if (parsed.protocol === 'chrome-extension:') {
+      return /^[a-p]{32}$/.test(parsed.hostname);
+    }
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && isLoopbackHostname(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function secureStringEqual(provided: unknown, expected: string): boolean {
+  if (typeof provided !== 'string') return false;
+  const actualBuffer = Buffer.from(provided, 'utf8');
+  const expectedBuffer = Buffer.from(expected, 'utf8');
+  return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
 export function createChromeControllerServer(config: ServerConfig = {}): ChromeControllerServer {
-  const apiKey = config.apiKey ?? (process.env.API_KEY || DEFAULT_API_KEY);
-  const MAX_BODY_BYTES = config.maxBodyBytes ?? Number(process.env.MAX_BODY_BYTES || DEFAULT_MAX_BODY_BYTES);
-  const DEFAULT_TIMEOUT = config.defaultTimeoutMs ?? Number(process.env.REQUEST_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
-  const MAX_BATCH = config.maxBatchActions ?? Number(process.env.MAX_BATCH_ACTIONS || DEFAULT_MAX_BATCH_ACTIONS);
-  const instance = config.instance ?? (process.env.CHROME_CONTROLLER_INSTANCE || 'default');
+  const apiKey = validateRelayApiKey(config.apiKey ?? process.env.API_KEY ?? generateRelayApiKey());
+  const MAX_BODY_BYTES = boundedInteger(
+    config.maxBodyBytes ?? Number(process.env.MAX_BODY_BYTES || DEFAULT_MAX_BODY_BYTES),
+    'Maximum request body size',
+    1,
+    MAX_CONFIGURED_BODY_BYTES,
+  );
+  const DEFAULT_TIMEOUT = boundedInteger(
+    config.defaultTimeoutMs ?? Number(process.env.REQUEST_TIMEOUT_MS || DEFAULT_TIMEOUT_MS),
+    'Default request timeout',
+    1,
+    MAX_REQUEST_TIMEOUT_MS,
+  );
+  const MAX_BATCH = boundedInteger(
+    config.maxBatchActions ?? Number(process.env.MAX_BATCH_ACTIONS || DEFAULT_MAX_BATCH_ACTIONS),
+    'Maximum batch action count',
+    1,
+    MAX_CONFIGURED_BATCH_ACTIONS,
+  );
+  const instance = normalizeInstanceName(config.instance ?? (process.env.CHROME_CONTROLLER_INSTANCE || 'default'));
   const shouldWriteDiscovery = config.writeDiscoveryFile !== false;
+  let publishedDiscovery: DiscoveryInfo | null = null;
 
   // 0 = let OS pick a free port; env vars override
-  const wsPortHint = config.wsPort ?? Number(process.env.WS_PORT || 0);
-  const httpPortHint = config.httpPort ?? Number(process.env.HTTP_PORT || 0);
+  const wsPortHint = boundedInteger(config.wsPort ?? Number(process.env.WS_PORT || 0), 'WebSocket port', 0, 65535);
+  const httpPortHint = boundedInteger(config.httpPort ?? Number(process.env.HTTP_PORT || 0), 'HTTP port', 0, 65535);
 
   let activeClient: WebSocket | null = null;
   const pendingRequests = new Map<number, PendingRequest>();
@@ -154,6 +198,32 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
   // ── WebSocket Server ─────────────────────────────────────────────────────────
 
   const wss = new WebSocketServer({ port: wsPortHint, host: '127.0.0.1' });
+  let startupError: Error | null = null;
+  let rejectStartup: ((reason: Error) => void) | null = null;
+
+  function recordStartupError(kind: 'HTTP' | 'WebSocket' | 'Discovery', error: Error): void {
+    const code = (error as NodeJS.ErrnoException).code;
+    const port = kind === 'HTTP' ? httpPortHint : wsPortHint;
+    const detail = kind === 'Discovery'
+      ? `discovery publication failed${code ? ` (${code})` : ''}`
+      : code === 'EADDRINUSE'
+        ? `${kind} port ${port} is already in use`
+        : `${kind} listener failed${code ? ` (${code})` : ''}`;
+    const wrapped = new Error(`Chrome Controller ${detail}`);
+    startupError ??= wrapped;
+    console.error(`[${instance}] ${wrapped.message}`);
+    rejectStartup?.(wrapped);
+    if (kind === 'WebSocket') {
+      try { httpServer.close(); } catch {}
+    } else if (kind === 'HTTP') {
+      try { wss.close(); } catch {}
+    } else {
+      try { wss.close(); } catch {}
+      try { httpServer.close(); } catch {}
+    }
+  }
+
+  wss.on('error', (error) => recordStartupError('WebSocket', error));
 
   wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     const remoteAddr = req.socket.remoteAddress;
@@ -163,8 +233,17 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
       return;
     }
 
-    const url = new URL(req.url ?? '/', `http://${req.headers.host || '127.0.0.1'}`);
-    if (url.searchParams.get('key') !== apiKey) {
+    if (!hasAllowedHost(req.headers.host) || !hasAllowedOrigin(req.headers.origin)) {
+      console.error('Rejected WebSocket connection with invalid Host or Origin');
+      ws.close(1008, 'Forbidden: Invalid Host or Origin');
+      return;
+    }
+
+    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+    const bearer = typeof req.headers.authorization === 'string'
+      ? req.headers.authorization.replace(/^Bearer\s+/i, '')
+      : undefined;
+    if (!secureStringEqual(url.searchParams.get('key') ?? bearer, apiKey)) {
       console.log('Rejected WebSocket connection: Invalid API key');
       ws.close(1008, 'Invalid API key');
       return;
@@ -212,7 +291,11 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
   // ── Utilities ────────────────────────────────────────────────────────────────
 
   function sendJson(res: http.ServerResponse, statusCode: number, payload: unknown): void {
-    res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+    res.writeHead(statusCode, {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+    });
     res.end(JSON.stringify(payload));
   }
 
@@ -227,10 +310,13 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
       }
 
       const id = requestIdCounter++;
-      const timeoutMs = Number(
+      const timeoutMs = boundedInteger(
         (params.requestTimeoutMs as number | undefined) ??
         (params.timeoutMs as number | undefined) ??
-        DEFAULT_TIMEOUT
+        DEFAULT_TIMEOUT,
+        'Request timeout',
+        1,
+        MAX_REQUEST_TIMEOUT_MS,
       );
       const timer = setTimeout(() => {
         if (pendingRequests.has(id)) {
@@ -309,11 +395,13 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
   function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
       let body = '';
+      let receivedBytes = 0;
       let rejected = false;
       req.on('data', (chunk: Buffer) => {
         if (rejected) return;
+        receivedBytes += chunk.length;
         body += chunk.toString();
-        if (Buffer.byteLength(body) > MAX_BODY_BYTES) {
+        if (receivedBytes > MAX_BODY_BYTES) {
           rejected = true;
           req.pause();
           reject(new Error(`Request body exceeds ${MAX_BODY_BYTES} bytes`));
@@ -340,6 +428,11 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
       return;
     }
 
+    if (!hasAllowedHost(req.headers.host) || !hasAllowedOrigin(req.headers.origin)) {
+      sendJson(res, 403, { success: false, error: 'Forbidden: Invalid Host or Origin' });
+      return;
+    }
+
     // Resolve actual ports after listen
     const actualHttpPort = (httpServer.address() as { port: number })?.port ?? httpPortHint;
     const actualWsPort = (wss.address() as { port: number })?.port ?? wsPortHint;
@@ -361,7 +454,7 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
       const providedKey =
         req.headers['x-api-key'] ??
         (req.headers['authorization'] as string | undefined)?.replace(/^Bearer\s+/i, '');
-      if (providedKey !== apiKey) {
+      if (!secureStringEqual(providedKey, apiKey)) {
         sendJson(res, 401, { success: false, error: 'Unauthorized: Invalid or missing API key' });
         return;
       }
@@ -401,8 +494,11 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
     }
   });
 
+  httpServer.on('error', (error) => recordStartupError('HTTP', error));
+
   // Start listening — strictly on 127.0.0.1
   httpServer.listen(httpPortHint, '127.0.0.1', () => {
+    if (startupError || !wss.address()) return;
     const actualHttpPort = (httpServer.address() as { port: number }).port;
     const actualWsPort = (wss.address() as { port: number }).port;
 
@@ -411,30 +507,44 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
     console.log(`[${instance}] Health    → curl http://127.0.0.1:${actualHttpPort}/health`);
 
     if (shouldWriteDiscovery) {
-      writeDiscovery(instance, {
-        httpPort: actualHttpPort,
-        wsPort: actualWsPort,
-        apiKey,
-        pid: process.pid,
-        startedAt: new Date().toISOString(),
-      });
-      console.log(`[${instance}] Discovery → ${DISCOVERY_DIR}/${instance}.json`);
+      try {
+        const discovery = {
+          httpPort: actualHttpPort,
+          wsPort: actualWsPort,
+          apiKey,
+          pid: process.pid,
+          startedAt: new Date().toISOString(),
+        };
+        writeDiscovery(instance, discovery);
+        publishedDiscovery = discovery;
+        console.log(`[${instance}] Discovery → ${DISCOVERY_DIR}/${instance}.json`);
+      } catch (error) {
+        recordStartupError('Discovery', error as Error);
+      }
     }
   });
 
-  const ready = new Promise<{ httpPort: number; wsPort: number }>((resolve) => {
+  const ready = new Promise<{ httpPort: number; wsPort: number }>((resolve, reject) => {
+    rejectStartup = reject;
     let httpReady = Boolean(httpServer.listening);
     let wsReady = Boolean(wss.address());
 
     const check = () => {
+      if (startupError) {
+        reject(startupError);
+        return;
+      }
       if (httpReady && wsReady) {
         const actualHttpPort = (httpServer.address() as { port: number })?.port ?? httpPortHint;
         const actualWsPort = (wss.address() as { port: number })?.port ?? wsPortHint;
+        rejectStartup = null;
         resolve({ httpPort: actualHttpPort, wsPort: actualWsPort });
       }
     };
 
-    if (httpReady && wsReady) {
+    if (startupError) {
+      reject(startupError);
+    } else if (httpReady && wsReady) {
       check();
     } else {
       if (!httpReady) {
@@ -462,7 +572,10 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
     isExtensionReady,
     ready,
     close: () => {
-      if (shouldWriteDiscovery) removeDiscovery(instance);
+      if (publishedDiscovery) {
+        removeDiscovery(instance, publishedDiscovery);
+        publishedDiscovery = null;
+      }
       for (const [, req] of pendingRequests) {
         try { req.reject(new Error('Server closed')); } catch {}
       }
@@ -470,11 +583,11 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
       for (const client of wss.clients) {
         try { client.terminate(); } catch {}
       }
-      wss.close();
+      try { wss.close(); } catch {}
       if (typeof (httpServer as any).closeAllConnections === 'function') {
         (httpServer as any).closeAllConnections();
       }
-      httpServer.close();
+      try { httpServer.close(); } catch {}
     },
   };
 }
@@ -484,6 +597,12 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
 const isMain = /(?:^|[\\/])server\.(?:js|ts)$/.test(process.argv[1] || '');
 if (isMain) {
   const srv = createChromeControllerServer();
+
+  void srv.ready.catch((error) => {
+    console.error(`[${srv.instance}] Chrome Controller startup failed: ${(error as Error).message}`);
+    srv.close();
+    process.exitCode = 1;
+  });
 
   // Clean up discovery file on exit
   process.on('SIGINT', () => { srv.close(); process.exit(0); });

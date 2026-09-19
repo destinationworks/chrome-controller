@@ -9,25 +9,15 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import fs from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
 import net from 'node:net';
 import { getSocketPath } from './native-host.js';
+import {
+  normalizeInstanceName,
+  readDiscovery,
+  validateRelayApiKey,
+} from './discovery.js';
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8898';
-const DEFAULT_API_KEY = 'B3C65095-74E1-4F48-9EBB-64F5DD6AB078';
-const DISCOVERY_DIR = path.join(os.homedir(), '.chrome-controller');
-
-function readDiscovery(instance: string): { httpPort: number; apiKey: string } | null {
-  try {
-    const data = JSON.parse(
-      fs.readFileSync(path.join(DISCOVERY_DIR, `${instance}.json`), 'utf8')
-    ) as { httpPort: number; apiKey: string };
-    return data;
-  } catch {
-    return null;
-  }
-}
 
 type ChromeAction = {
   action: string;
@@ -44,20 +34,39 @@ type ChromeResponse = {
   mode?: string;
 };
 
-function baseUrl(): string {
-  if (process.env.CHROME_CONTROLLER_URL) return process.env.CHROME_CONTROLLER_URL;
-  const instance = process.env.CHROME_CONTROLLER_INSTANCE || 'default';
-  const discovery = readDiscovery(instance);
-  if (discovery) return `http://127.0.0.1:${discovery.httpPort}`;
-  return DEFAULT_BASE_URL;
+function validateLoopbackRelayUrl(value: string): string {
+  const parsed = new URL(value);
+  const hostname = parsed.hostname.toLowerCase();
+  const loopback = hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '[::1]' || hostname === '::1';
+  if (parsed.protocol !== 'http:' || !loopback || parsed.username || parsed.password) {
+    throw new Error('Chrome Controller relay URL must be an unauthenticated HTTP loopback URL');
+  }
+  return parsed.toString().replace(/\/$/, '');
 }
 
-function apiKey(): string {
-  if (process.env.CHROME_CONTROLLER_API_KEY) return process.env.CHROME_CONTROLLER_API_KEY;
-  const instance = process.env.CHROME_CONTROLLER_INSTANCE || 'default';
+function relayConfig(): { baseUrl: string; apiKey: string } {
+  const instance = normalizeInstanceName(process.env.CHROME_CONTROLLER_INSTANCE || 'default');
   const discovery = readDiscovery(instance);
-  if (discovery) return discovery.apiKey;
-  return DEFAULT_API_KEY;
+  const explicitUrl = process.env.CHROME_CONTROLLER_URL ??
+    (process.env.HTTP_PORT ? `http://127.0.0.1:${process.env.HTTP_PORT}` : undefined);
+  const explicitKey = process.env.CHROME_CONTROLLER_API_KEY ?? process.env.API_KEY;
+  if (explicitUrl || explicitKey) {
+    if (!explicitKey) {
+      const normalizedUrl = validateLoopbackRelayUrl(explicitUrl ?? DEFAULT_BASE_URL);
+      if (discovery && normalizedUrl === `http://127.0.0.1:${discovery.httpPort}`) {
+        return { baseUrl: normalizedUrl, apiKey: discovery.apiKey };
+      }
+      throw new Error('RELAY_CONFIG_UNAVAILABLE: an explicit relay URL requires CHROME_CONTROLLER_API_KEY');
+    }
+    return {
+      baseUrl: validateLoopbackRelayUrl(explicitUrl ?? DEFAULT_BASE_URL),
+      apiKey: validateRelayApiKey(explicitKey),
+    };
+  }
+  if (discovery) {
+    return { baseUrl: `http://127.0.0.1:${discovery.httpPort}`, apiKey: discovery.apiKey };
+  }
+  throw new Error('RELAY_CONFIG_UNAVAILABLE: no private Chrome Controller discovery file or explicit relay credentials are available');
 }
 
 function textResult(value: unknown) {
@@ -119,11 +128,12 @@ async function chromeRequest(payload: ChromeAction | Record<string, unknown>, si
     }
   }
 
-  const response = await fetch(baseUrl(), {
+  const relay = relayConfig();
+  const response = await fetch(relay.baseUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-api-key': apiKey(),
+      'x-api-key': relay.apiKey,
     },
     body: JSON.stringify(payload),
     signal,
@@ -155,7 +165,8 @@ async function chromeHealth(signal?: AbortSignal): Promise<ChromeResponse> {
     }
   }
 
-  const response = await fetch(`${baseUrl()}/health`, { signal });
+  const relay = relayConfig();
+  const response = await fetch(`${relay.baseUrl}/health`, { signal });
   const data = (await response.json()) as ChromeResponse;
   if (!response.ok) {
     throw new Error(data.error ?? `Chrome Controller health returned HTTP ${response.status}`);

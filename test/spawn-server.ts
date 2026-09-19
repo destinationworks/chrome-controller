@@ -1,21 +1,25 @@
 /**
  * Helper script spawned by port-conflict.test.ts to test EADDRINUSE crash behavior.
  * Takes a blocked port as argv[0] and tries to create a server on it.
- * The process will crash with an uncaught EADDRINUSE exception.
+ * The process reports the rejected ready promise and exits without an uncaught exception.
  */
 import { createChromeControllerServer } from '../src/server.ts';
 
 const blockedPort = Number(process.argv[2]);
 
-// This will crash because the port is blocked and there's no error handler
-createChromeControllerServer({
+const server = createChromeControllerServer({
   wsPort: blockedPort,
   httpPort: 0,
-  apiKey: 'test-key',
+  apiKey: 'test-key-0123456789abcdef01234567',
   writeDiscoveryFile: false,
 });
 
-// Keep process alive briefly so the error can fire
-setTimeout(() => {
+try {
+  await server.ready;
+  server.close();
   process.exit(0);
-}, 2000);
+} catch (error) {
+  console.error(`Port conflict: ${(error as Error).message}`);
+  server.close();
+  process.exit(2);
+}

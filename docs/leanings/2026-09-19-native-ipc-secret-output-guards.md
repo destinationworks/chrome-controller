@@ -1,0 +1,22 @@
+# 2026-09-19 — Native IPC secret output guards for post-extraction browser inspection
+
+- **Status:** Resolved
+- **Task/context:** Hardening the integration boundary between Secure Clipboard extraction and later Chrome Controller inspection using synthetic fixtures only.
+- **Unexpected observation or failure:** Secure Clipboard could safely capture a value and return only an opaque handle, while a later browser DOM or accessibility inspection independently returned the same value because the source page still rendered it as ordinary text.
+- **Evidence:** A failing native-host regression registered a synthetic guarded value, then returned it in nested DOM text, accessibility name/value fields, base64, hex, reversed text, and an error. Every form crossed the Unix IPC response unchanged before the fix.
+- **Approaches tried:**
+  - **Attempt:** Rely on extraction-time handle opacity and documentation telling agents not to inspect the page afterward.
+    - **Outcome:** Did not work
+    - **Why:** Handle opacity protects the extraction response, not independent outputs produced later by the browser process.
+  - **Attempt:** Mask only the rendered page after extraction.
+    - **Outcome:** Partial
+    - **Why:** DOM mutation protects normal DOM/accessibility reads but cannot cover every browser-owned object, pre-existing closed shadow root, console/error payload, or controller response shape.
+  - **Attempt:** Combine fail-closed page masking with a native-host output guard in one fused native operation before the Secure Clipboard handle is returned.
+    - **Outcome:** Worked
+    - **Why:** The page layer removes ordinary inspection sources, while the IPC layer recursively redacts raw and trivially encoded matches from controller results, errors, and event logs.
+- **Root cause:** The security boundary ended at the Secure Clipboard tool response. No state connected a successful extraction to later Chrome Controller output, and extraction teardown removed only the temporary clipboard trap rather than the page-visible value.
+- **Resolution:** Added the internal native-IPC `extractSecretGuarded` action, bounded guard count/value size/TTL, recursive key/value redaction, derived-form coverage, expiry cleanup, late-response dropping, event suppression, and event-log sanitization. Extraction and reachable page masking occur in one browser evaluation; the host registers patterns before returning the value. Uncertain failures close the source tab, or quarantine all further output if closure fails.
+- **Verification:** `src/native-host.test.ts` covers raw, padded/unpadded standard and URL-safe base64, hex lower/upper, reversed and Unicode-derived forms, nested DOM/accessibility payloads, errors, events, late responses, and quarantine with synthetic fixtures. `src/secure-extraction.test.ts` executes the guard in headless Chrome and verifies DOM text, input/ARIA values, CSS pseudo-content, same-origin frames, open shadow DOM, mutation rerenders, the actual accessibility snapshot, and zero real-clipboard calls. Typecheck, focused tests, full suite, and lint are required gates.
+- **Prevention/follow-up:** Keep guarded extraction local to the `0600` native socket and never expose it as a general MCP tool. Treat page masking and controller redaction as complementary controls; standalone relay, cross-origin/closed browser internals, and unrelated automation processes do not share the native registry.
+- **Reusable learning:** An opaque extraction response is not a complete browser secrecy boundary; bind extraction to enforceable post-extraction page masking and output-channel redaction before returning success.
+- **References:** `src/native-host.ts`, `src/native-host.test.ts`, `/Users/dst/dev/secure-clipboard-mcp/src/chrome.rs`, `/Users/dst/dev/secure-clipboard-mcp/tests/browser_guard_test.rs`

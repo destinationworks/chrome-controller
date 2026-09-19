@@ -28,6 +28,7 @@ test('manifest requests only permissions exercised by the extension runtime', ()
     'debugger',
     'tabGroups',
     'alarms',
+    'storage',
     'nativeMessaging',
   ]);
 });
@@ -122,10 +123,17 @@ test('background script implements getConnectionState message handler for popup'
   assert.match(backgroundScript, /wsConnected:\s*Boolean\(/);
 });
 
+test('relay credentials are paired at runtime and are not hard-coded in the extension', () => {
+  assert.doesNotMatch(backgroundScript, /const\s+(?:DEFAULT_)?API_KEY\s*=/);
+  assert.doesNotMatch(backgroundScript, /ws:\/\/[^'"`\n]*\?key=[A-Za-z0-9_-]{16,}/);
+  assert.match(backgroundScript, /\?key=\$\{encodeURIComponent\(relayConfig\.apiKey\)\}/);
+  assert.match(backgroundScript, /getRelayConfig/);
+  assert.match(backgroundScript, /chrome\.storage\.session/);
+});
+
 test('popup.js has valid JavaScript syntax', async () => {
   const popupJs = await readFile(path.join(extensionDir, 'popup.js'), 'utf8');
   assert.doesNotThrow(() => {
     new Function(popupJs); // parses syntax without executing
   }, 'popup.js contains syntax errors');
 });
-

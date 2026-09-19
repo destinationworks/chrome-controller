@@ -64,12 +64,13 @@ describe('Port mismatch detection', () => {
     // Clean up any stale discovery file from previous runs
     try { await fs.unlink(discoveryPath); } catch { /* ignore */ }
 
-    server = await createChromeControllerServer({
+    server = createChromeControllerServer({
       httpPort: 0,         // random available port
       wsPort: 0,           // random available port
-      apiKey: 'test-token',
+      apiKey: 'test-token-0123456789abcdef012345',
       instance,
     });
+    await server.ready;
   });
 
   after(async () => {
@@ -91,7 +92,7 @@ describe('Port mismatch detection', () => {
   });
 
   it('WebSocket works on actual dynamic port', async () => {
-    await connectWebSocket('127.0.0.1', server.wsPort, 'test-token');
+    await connectWebSocket('127.0.0.1', server.wsPort, 'test-token-0123456789abcdef012345');
   });
 
   it('discovery file contains actual dynamic ports, not hardcoded defaults', async () => {

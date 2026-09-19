@@ -5,8 +5,8 @@
  * Kills stale server, rebuilds if needed, starts fresh, and waits for healthy.
  * Usage: node scripts/start.js [--no-rebuild]
  */
-import { spawn, execSync } from 'node:child_process';
-import { readFileSync, statSync } from 'node:fs';
+import { spawn, execFileSync } from 'node:child_process';
+import { statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -15,9 +15,15 @@ const ROOT = join(__dirname, '..');
 
 const DEFAULT_HTTP_PORT = 8898;
 const DEFAULT_WS_PORT = 8899;
-const API_KEY = process.env.API_KEY ?? 'B3C65095-74E1-4F48-9EBB-64F5DD6AB078';
 const HTTP_PORT = process.env.HTTP_PORT ?? DEFAULT_HTTP_PORT;
 const WS_PORT = process.env.WS_PORT ?? DEFAULT_WS_PORT;
+
+for (const [name, value] of [['HTTP_PORT', HTTP_PORT], ['WS_PORT', WS_PORT]]) {
+  const port = Number(value);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`${name} must be an integer from 1 to 65535`);
+  }
+}
 
 const noRebuild = process.argv.includes('--no-rebuild');
 
@@ -29,7 +35,7 @@ function info(msg) {
 
 function httpGet(url) {
   try {
-    return execSync(`curl -s --max-time 2 "${url}" 2>/dev/null`, { encoding: 'utf8' });
+    return execFileSync('curl', ['-s', '--max-time', '2', url], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
   } catch {
     return null;
   }
@@ -37,11 +43,15 @@ function httpGet(url) {
 
 function killPort(port) {
   try {
-    const pid = execSync(`lsof -ti:${port} 2>/dev/null`, { encoding: 'utf8' }).trim();
-    if (pid) {
-      execSync(`kill ${pid} 2>/dev/null`);
-      info(`Killed process on port ${port}`);
+    const pids = execFileSync('lsof', ['-ti', `tcp:${port}`], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim().split(/\s+/).filter(Boolean);
+    for (const pid of pids) {
+      if (!/^\d+$/.test(pid)) continue;
+      process.kill(Number(pid), 'SIGTERM');
     }
+    if (pids.length > 0) info(`Killed process on port ${port}`);
   } catch {
     // nothing running
   }
@@ -70,7 +80,7 @@ function needsRebuild() {
 
 function build() {
   info('Building...');
-  execSync('npm run build', { cwd: ROOT, stdio: 'inherit' });
+  execFileSync('npm', ['run', 'build'], { cwd: ROOT, stdio: 'inherit' });
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -104,7 +114,7 @@ async function main() {
   const server = spawn('node', [join(ROOT, 'dist/server.js')], {
     cwd: ROOT,
     stdio: ['inherit', 'inherit', 'inherit'],
-    env: { ...process.env, HTTP_PORT: String(HTTP_PORT), WS_PORT: String(WS_PORT), API_KEY },
+    env: { ...process.env, HTTP_PORT: String(HTTP_PORT), WS_PORT: String(WS_PORT) },
     detached: false,
   });
 
@@ -124,7 +134,7 @@ async function main() {
       info('Server is healthy!');
       info(`  HTTP: http://127.0.0.1:${HTTP_PORT}`);
       info(`  WS:   ws://127.0.0.1:${WS_PORT}`);
-      info(`  Key:  ${API_KEY}`);
+      info('Relay credentials were generated privately and paired through Native Messaging.');
       info('Load the Chrome extension in chrome://extensions to connect.');
       // Keep process alive — server runs in foreground
       return;

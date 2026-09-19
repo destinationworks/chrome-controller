@@ -12,6 +12,19 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { readDiscovery, getConfig, sendCommand } from './mcp.js';
+import { removeDiscovery, writeDiscovery } from './discovery.js';
+
+const TEST_API_KEY = 'test-key-0123456789abcdef01234567';
+
+function testDiscovery(httpPort: number, apiKey = TEST_API_KEY) {
+  return {
+    httpPort,
+    wsPort: httpPort === 65535 ? 65534 : httpPort + 1,
+    apiKey,
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+  };
+}
 
 // ── readDiscovery tests ──────────────────────────────────────────────────────
 
@@ -23,22 +36,18 @@ test('readDiscovery returns null for non-existent file', () => {
 test('readDiscovery returns parsed data for valid file', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-test-'));
   const instancePath = path.join(tmpDir, 'test-discovery.json');
-  const discoveryData = { httpPort: 9999, apiKey: 'TEST-KEY-123' };
+  const discoveryData = testDiscovery(9999);
   fs.writeFileSync(instancePath, JSON.stringify(discoveryData));
 
   // Monkey-patch DISCOVERY_DIR indirectly: we can't, so write to actual ~/.chrome-controller
   const testInstance = 'mcp-test-' + Date.now();
-  const discoveryDir = path.join(os.homedir(), '.chrome-controller');
-  fs.writeFileSync(
-    path.join(discoveryDir, `${testInstance}.json`),
-    JSON.stringify(discoveryData)
-  );
+  writeDiscovery(testInstance, discoveryData);
 
   try {
     const result = readDiscovery(testInstance);
     assert.deepStrictEqual(result, discoveryData);
   } finally {
-    fs.rmSync(path.join(discoveryDir, `${testInstance}.json`), { force: true });
+    removeDiscovery(testInstance);
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
@@ -46,7 +55,8 @@ test('readDiscovery returns parsed data for valid file', () => {
 test('readDiscovery returns null for malformed JSON', () => {
   const testInstance = 'mcp-test-malformed-' + Date.now();
   const discoveryDir = path.join(os.homedir(), '.chrome-controller');
-  fs.writeFileSync(path.join(discoveryDir, `${testInstance}.json`), 'not-json{{{');
+  fs.mkdirSync(discoveryDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(discoveryDir, `${testInstance}.json`), 'not-json{{{', { mode: 0o600 });
 
   try {
     const result = readDiscovery(testInstance);
@@ -58,7 +68,7 @@ test('readDiscovery returns null for malformed JSON', () => {
 
 // ── getConfig tests ─────────────────────────────────────────────────────────
 
-test('getConfig returns defaults when no env or discovery', () => {
+test('getConfig fails closed when no env or private discovery exists', () => {
   const origHttpPort = process.env.HTTP_PORT;
   const origApiKey = process.env.API_KEY;
   const origInstance = process.env.CHROME_CONTROLLER_INSTANCE;
@@ -68,9 +78,7 @@ test('getConfig returns defaults when no env or discovery', () => {
   process.env.CHROME_CONTROLLER_INSTANCE = 'mcp-test-no-discovery-' + Date.now();
 
   try {
-    const config = getConfig();
-    assert.strictEqual(config.httpPort, 8898);
-    assert.strictEqual(config.apiKey, 'B3C65095-74E1-4F48-9EBB-64F5DD6AB078');
+    assert.throws(() => getConfig(), /RELAY_CONFIG_UNAVAILABLE/);
   } finally {
     if (origHttpPort !== undefined) process.env.HTTP_PORT = origHttpPort;
     else delete process.env.HTTP_PORT;
@@ -86,12 +94,12 @@ test('getConfig uses explicit HTTP_PORT and API_KEY env vars', () => {
   const origApiKey = process.env.API_KEY;
 
   process.env.HTTP_PORT = '12345';
-  process.env.API_KEY = 'MY-SECRET-KEY';
+  process.env.API_KEY = TEST_API_KEY;
 
   try {
     const config = getConfig();
     assert.strictEqual(config.httpPort, 12345);
-    assert.strictEqual(config.apiKey, 'MY-SECRET-KEY');
+    assert.strictEqual(config.apiKey, TEST_API_KEY);
   } finally {
     if (origHttpPort !== undefined) process.env.HTTP_PORT = origHttpPort;
     else delete process.env.HTTP_PORT;
@@ -100,7 +108,7 @@ test('getConfig uses explicit HTTP_PORT and API_KEY env vars', () => {
   }
 });
 
-test('getConfig uses only HTTP_PORT when API_KEY is absent', () => {
+test('getConfig rejects HTTP_PORT without API_KEY or matching discovery', () => {
   const origHttpPort = process.env.HTTP_PORT;
   const origApiKey = process.env.API_KEY;
   const origInstance = process.env.CHROME_CONTROLLER_INSTANCE;
@@ -110,10 +118,7 @@ test('getConfig uses only HTTP_PORT when API_KEY is absent', () => {
   process.env.CHROME_CONTROLLER_INSTANCE = 'mcp-test-partial-' + Date.now();
 
   try {
-    const config = getConfig();
-    assert.strictEqual(config.httpPort, 5555);
-    // Falls back to discovery or default for apiKey
-    assert.ok(typeof config.apiKey === 'string' && config.apiKey.length > 0);
+    assert.throws(() => getConfig(), /RELAY_CONFIG_UNAVAILABLE/);
   } finally {
     if (origHttpPort !== undefined) process.env.HTTP_PORT = origHttpPort;
     else delete process.env.HTTP_PORT;
@@ -133,18 +138,14 @@ test('getConfig reads from discovery file for default instance', () => {
   delete process.env.API_KEY;
   process.env.CHROME_CONTROLLER_INSTANCE = 'mcp-test-default-' + Date.now();
 
-  const discoveryDir = path.join(os.homedir(), '.chrome-controller');
-  fs.writeFileSync(
-    path.join(discoveryDir, `${process.env.CHROME_CONTROLLER_INSTANCE}.json`),
-    JSON.stringify({ httpPort: 7777, apiKey: 'DISCOVERY-KEY' })
-  );
+  writeDiscovery(process.env.CHROME_CONTROLLER_INSTANCE, testDiscovery(7777));
 
   try {
     const config = getConfig();
     assert.strictEqual(config.httpPort, 7777);
-    assert.strictEqual(config.apiKey, 'DISCOVERY-KEY');
+    assert.strictEqual(config.apiKey, TEST_API_KEY);
   } finally {
-    fs.rmSync(path.join(discoveryDir, `${process.env.CHROME_CONTROLLER_INSTANCE}.json`), { force: true });
+    removeDiscovery(process.env.CHROME_CONTROLLER_INSTANCE);
     if (origHttpPort !== undefined) process.env.HTTP_PORT = origHttpPort;
     else delete process.env.HTTP_PORT;
     if (origApiKey !== undefined) process.env.API_KEY = origApiKey;
@@ -182,7 +183,7 @@ test('sendCommand sends correct action and params to server', async () => {
   await new Promise<void>((resolve) => server.listen(0, () => resolve()));
   const port = (server.address() as net.AddressInfo).port;
   process.env.HTTP_PORT = String(port);
-  process.env.API_KEY = 'test-key';
+  process.env.API_KEY = TEST_API_KEY;
 
   try {
     const result = await sendCommand('queryTabs', { url: 'https://example.com' });
@@ -216,7 +217,7 @@ test('sendCommand rejects when server returns error response', async () => {
   await new Promise<void>((resolve) => server.listen(0, () => resolve()));
   const port = (server.address() as net.AddressInfo).port;
   process.env.HTTP_PORT = String(port);
-  process.env.API_KEY = 'test-key';
+  process.env.API_KEY = TEST_API_KEY;
 
   try {
     await assert.rejects(
@@ -316,7 +317,7 @@ test('sendCommand falls back to HTTP relay when CHROME_CONTROLLER_ALLOW_RELAY=1 
   const port = (server.address() as net.AddressInfo).port;
 
   process.env.HTTP_PORT = String(port);
-  process.env.API_KEY = 'test-key';
+  process.env.API_KEY = TEST_API_KEY;
   process.env.CHROME_CONTROLLER_ALLOW_RELAY = '1';
   process.env.CHROME_CONTROLLER_SOCKET = '/tmp/nonexistent-relay-socket-' + Date.now() + '.sock';
 
@@ -381,5 +382,3 @@ test('sendCommand dispatches getConsoleLogs and cleanupManagedTabs over IPC', as
     fs.rmSync(tmpBase, { recursive: true, force: true });
   }
 });
-
-

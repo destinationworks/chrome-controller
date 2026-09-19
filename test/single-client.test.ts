@@ -17,6 +17,8 @@ import {
   type ChromeControllerServer,
 } from '../src/server.ts';
 
+const TEST_KEY = 'test-key-0123456789abcdef01234567';
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function httpPost(
@@ -112,18 +114,18 @@ test('only one WebSocket client can be active at a time', async () => {
   const srv = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'test-key',
+    apiKey: TEST_KEY,
     writeDiscoveryFile: false,
   });
 
   await waitForServerReady(srv);
 
   // First client connects successfully
-  const client1 = await connectExtension(srv.wsPort, 'test-key');
+  const client1 = await connectExtension(srv.wsPort, TEST_KEY);
   assert.equal(client1.readyState, WebSocket.OPEN);
 
   // Second client should be rejected or close the first
-  const client2Promise = connectExtension(srv.wsPort, 'test-key');
+  const client2Promise = connectExtension(srv.wsPort, TEST_KEY);
   const client2 = await client2Promise;
 
   // After second connects, check health
@@ -145,7 +147,7 @@ test('no request queue when extension is disconnected', async () => {
   const srv = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'test-key',
+    apiKey: TEST_KEY,
     writeDiscoveryFile: false,
   });
 
@@ -156,7 +158,7 @@ test('no request queue when extension is disconnected', async () => {
     srv.httpPort,
     '/',
     { action: 'queryTabs' },
-    'test-key',
+    TEST_KEY,
   );
 
   // Request fails immediately with 503 — no queue
@@ -173,18 +175,18 @@ test('requests fail immediately when no client, not queued for later', async () 
   const srv = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'test-key',
+    apiKey: TEST_KEY,
     writeDiscoveryFile: false,
   });
 
   await waitForServerReady(srv);
 
   // Send request with no client
-  const reqPromise = httpPost(srv.httpPort, '/', { action: 'test' }, 'test-key');
+  const reqPromise = httpPost(srv.httpPort, '/', { action: 'test' }, TEST_KEY);
 
   // Connect client after request was sent
   await new Promise((r) => setTimeout(r, 50));
-  const ext = await connectExtension(srv.wsPort, 'test-key');
+  const ext = await connectExtension(srv.wsPort, TEST_KEY);
 
   // The earlier request already failed — it was not queued
   const { status } = await reqPromise;
@@ -198,14 +200,14 @@ test('multiple HTTP clients can send requests concurrently', async () => {
   const srv = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'test-key',
+    apiKey: TEST_KEY,
     writeDiscoveryFile: false,
   });
 
   await waitForServerReady(srv);
 
   // Connect extension with auto-reply
-  const ext = await connectExtension(srv.wsPort, 'test-key');
+  const ext = await connectExtension(srv.wsPort, TEST_KEY);
   ext.on('message', (data: Buffer | string) => {
     const msg = JSON.parse(data.toString()) as Record<string, unknown>;
     ext.send(JSON.stringify({ id: msg['id'], result: 'ok' }));
@@ -214,7 +216,7 @@ test('multiple HTTP clients can send requests concurrently', async () => {
   // Multiple HTTP clients can send requests
   const results = await Promise.all(
     Array.from({ length: 5 }, () =>
-      httpPost(srv.httpPort, '/', { action: 'test' }, 'test-key'),
+      httpPost(srv.httpPort, '/', { action: 'test' }, TEST_KEY),
     ),
   );
 
@@ -231,21 +233,21 @@ test('pending requests are not forwarded to new client after reconnect', async (
   const srv = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'test-key',
+    apiKey: TEST_KEY,
     writeDiscoveryFile: false,
   });
 
   await waitForServerReady(srv);
 
   // Connect first extension
-  const ext1 = await connectExtension(srv.wsPort, 'test-key');
+  const ext1 = await connectExtension(srv.wsPort, TEST_KEY);
 
   // Send request with long timeout (extension won't reply)
   const reqPromise = httpPost(
     srv.httpPort,
     '/',
     { action: 'slow-action', requestTimeoutMs: 10000 },
-    'test-key',
+    TEST_KEY,
   );
 
   await new Promise((r) => setTimeout(r, 100));
@@ -255,7 +257,7 @@ test('pending requests are not forwarded to new client after reconnect', async (
   await new Promise((r) => setTimeout(r, 100));
 
   // Connect new extension
-  const ext2 = await connectExtension(srv.wsPort, 'test-key');
+  const ext2 = await connectExtension(srv.wsPort, TEST_KEY);
   ext2.on('message', (data: Buffer | string) => {
     const msg = JSON.parse(data.toString()) as Record<string, unknown>;
     ext2.send(JSON.stringify({ id: msg['id'], result: 'from-ext2' }));
@@ -278,7 +280,7 @@ test('server does not buffer requests for offline extension', async () => {
   const srv = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'test-key',
+    apiKey: TEST_KEY,
     writeDiscoveryFile: false,
   });
 
@@ -286,7 +288,7 @@ test('server does not buffer requests for offline extension', async () => {
 
   // Send multiple requests with no extension
   const requests = Array.from({ length: 10 }, () =>
-    httpPost(srv.httpPort, '/', { action: 'test' }, 'test-key'),
+    httpPost(srv.httpPort, '/', { action: 'test' }, TEST_KEY),
   );
 
   const results = await Promise.all(requests);
@@ -297,14 +299,14 @@ test('server does not buffer requests for offline extension', async () => {
   }
 
   // Connect extension
-  const ext = await connectExtension(srv.wsPort, 'test-key');
+  const ext = await connectExtension(srv.wsPort, TEST_KEY);
   ext.on('message', (data: Buffer | string) => {
     const msg = JSON.parse(data.toString()) as Record<string, unknown>;
     ext.send(JSON.stringify({ id: msg['id'], result: 'ok' }));
   });
 
   // New requests work
-  const { status } = await httpPost(srv.httpPort, '/', { action: 'test' }, 'test-key');
+  const { status } = await httpPost(srv.httpPort, '/', { action: 'test' }, TEST_KEY);
   assert.ok(status === 200, 'New requests should work after extension connects');
 
   ext.close();

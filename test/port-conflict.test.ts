@@ -29,7 +29,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 function bindPort(port: number): Promise<http.Server> {
   return new Promise((resolvePromise) => {
     const srv = http.createServer();
-    srv.listen(port, () => resolvePromise(srv));
+    srv.listen(port, '127.0.0.1', () => resolvePromise(srv));
   });
 }
 
@@ -90,7 +90,7 @@ test('server starts on port 0 without conflicts', async () => {
   const srv = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'test-key',
+    apiKey: 'test-key-0123456789abcdef01234567',
     writeDiscoveryFile: false,
   });
 
@@ -108,7 +108,7 @@ test('WebSocketServer emits EADDRINUSE error event (not synchronous throw) when 
 
   // WSS emits 'error' event asynchronously (not a synchronous throw)
   const errorPromise = new Promise<NodeJS.ErrnoException>((resolvePromise) => {
-    const wss = new WebSocketServer({ port: blockedPort });
+    const wss = new WebSocketServer({ port: blockedPort, host: '127.0.0.1' });
     wss.on('error', (e) => {
       wss.close();
       resolvePromise(e as NodeJS.ErrnoException);
@@ -125,11 +125,7 @@ test('WebSocketServer emits EADDRINUSE error event (not synchronous throw) when 
   blocker.close();
 });
 
-test('createChromeControllerServer has no error handler on WSS (crash gap)', async () => {
-  // This test verifies the root cause: the WSS created inside
-  // createChromeControllerServer has no 'error' listener attached.
-  // We can't easily inspect the internal WSS, so we verify by behavior:
-  // when the WS port is blocked, the process crashes (tested via subprocess).
+test('createChromeControllerServer reports a blocked WebSocket port without an uncaught crash', async () => {
 
   const blocker = await bindPort(0);
   const addr = blocker.address() as { port: number };
@@ -137,44 +133,30 @@ test('createChromeControllerServer has no error handler on WSS (crash gap)', asy
 
   const result = spawnServerWithBlockedPort(blockedPort);
 
-  // The process should crash with a non-zero exit code
-  assert.ok(
-    result.exitCode !== 0,
-    `Expected non-zero exit code, got: ${result.exitCode}. Stderr: ${result.stderr}`,
-  );
-
-  // The stderr should contain EADDRINUSE
-  assert.ok(
-    result.stderr.includes('EADDRINUSE'),
-    `Expected EADDRINUSE in stderr, got: ${result.stderr}`,
-  );
+  assert.equal(result.exitCode, 2, `Expected handled startup failure, got: ${result.exitCode}`);
+  assert.match(result.stderr, /Port conflict:.*port .* already in use/);
+  assert.doesNotMatch(result.stderr, /Unhandled 'error' event/);
 
   blocker.close();
 });
 
-test('two servers on same fixed port cause crash on second server', async () => {
+test('two servers on the same fixed port reject the second startup cleanly', async () => {
   // First server takes dynamic ports
   const srv1 = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'test-key-1',
+    apiKey: 'test-key-one-0123456789abcdef0123',
     writeDiscoveryFile: false,
   });
 
   await waitForReady(srv1);
   const wsPort = srv1.wsPort;
 
-  // Second server tries the same WS port — crashes in subprocess
+  // Second server tries the same WS port and reports a handled startup failure.
   const result = spawnServerWithBlockedPort(wsPort);
 
-  assert.ok(
-    result.exitCode !== 0,
-    `Second server should crash, got exit code: ${result.exitCode}. Stderr: ${result.stderr}`,
-  );
-  assert.ok(
-    result.stderr.includes('EADDRINUSE'),
-    `Expected EADDRINUSE in stderr, got: ${result.stderr}`,
-  );
+  assert.equal(result.exitCode, 2, `Second server should fail startup cleanly: ${result.stderr}`);
+  assert.match(result.stderr, /Port conflict:.*port .* already in use/);
 
   // Verify first server still works
   const health = await new Promise<{ status: number; body: unknown }>((resolvePromise) => {
@@ -198,34 +180,18 @@ test('two servers on same fixed port cause crash on second server', async () => 
   srv1.close();
 });
 
-test('server should detect and report port conflicts gracefully', async () => {
-  // This test documents the expected behavior that is currently missing.
-  // The server should:
-  // 1. Catch EADDRINUSE on both WSS and HTTP server
-  // 2. Log a clear error message with the conflicting port
-  // 3. Optionally fall back to port 0 (OS-assigned)
-  // 4. Never crash the process
+test('server detects and reports port conflicts descriptively', async () => {
 
   const blocker = await bindPort(0);
   const addr = blocker.address() as { port: number };
   const blockedPort = addr.port;
 
-  // Current behavior: subprocess crashes with raw EADDRINUSE
   const result = spawnServerWithBlockedPort(blockedPort);
 
-  // The error is raw EADDRINUSE, not a wrapped/descriptive error
-  assert.ok(
-    result.exitCode !== 0,
-    'Should crash (no error handler)',
-  );
-  assert.ok(
-    !result.stderr.includes('port already in use') &&
-    !result.stderr.includes('Port conflict'),
-    'Error message should be more descriptive (currently raw EADDRINUSE)',
-  );
+  assert.equal(result.exitCode, 2);
+  assert.match(result.stderr, /Port conflict/);
+  assert.match(result.stderr, /WebSocket port .* is already in use/);
+  assert.doesNotMatch(result.stderr, /Unhandled 'error' event/);
 
   blocker.close();
-
-  // This assertion documents the gap: there is no graceful port conflict detection.
-  assert.ok(true, 'Port conflict detection is not implemented');
 });

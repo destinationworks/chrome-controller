@@ -21,6 +21,10 @@ import {
   type ChromeControllerServer,
 } from '../src/server.ts';
 
+const TEST_KEY = 'test-key-0123456789abcdef01234567';
+const TEST_KEY_ONE = 'test-key-one-0123456789abcdef0123';
+const TEST_KEY_TWO = 'test-key-two-0123456789abcdef0123';
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function uniqueInstance(): string {
@@ -75,7 +79,7 @@ test('discovery file is written after server starts listening', async () => {
   const srv = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'test-key',
+    apiKey: TEST_KEY,
     instance,
     writeDiscoveryFile: true,
   });
@@ -90,7 +94,7 @@ test('discovery file is written after server starts listening', async () => {
   assert.ok(discovery, 'Discovery file should exist after server is ready');
   assert.equal(discovery.httpPort, srv.httpPort);
   assert.equal(discovery.wsPort, srv.wsPort);
-  assert.equal(discovery.apiKey, 'test-key');
+  assert.equal(discovery.apiKey, TEST_KEY);
   assert.equal(discovery.pid, process.pid);
 
   srv.close();
@@ -106,7 +110,7 @@ test('discovery file is not available immediately at construction time', async (
   const srv = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'test-key',
+    apiKey: TEST_KEY,
     instance,
     writeDiscoveryFile: true,
   });
@@ -154,7 +158,7 @@ test('rapid client may read stale discovery from previous instance', async () =>
   const srv1 = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'key-1',
+    apiKey: TEST_KEY_ONE,
     instance,
     writeDiscoveryFile: true,
   });
@@ -170,7 +174,7 @@ test('rapid client may read stale discovery from previous instance', async () =>
   const srv2 = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'key-2',
+    apiKey: TEST_KEY_TWO,
     instance,
     writeDiscoveryFile: true,
   });
@@ -181,7 +185,7 @@ test('rapid client may read stale discovery from previous instance', async () =>
   // Discovery should point to srv2, not srv1
   const discovery = readDiscovery(instance);
   assert.ok(discovery, 'Discovery should exist');
-  assert.equal(discovery.apiKey, 'key-2', 'Discovery should have new key');
+  assert.equal(discovery.apiKey, TEST_KEY_TWO, 'Discovery should have new key');
   assert.notEqual(discovery.wsPort, ports1.ws, 'Ports should differ');
 
   srv2.close();
@@ -194,7 +198,7 @@ test('discovery file persists after server closes unexpectedly', async () => {
   const srv = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'test-key',
+    apiKey: TEST_KEY,
     instance,
     writeDiscoveryFile: true,
   });
@@ -245,7 +249,7 @@ test('writeDiscoveryFile false skips discovery file', async () => {
   const srv = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'test-key',
+    apiKey: TEST_KEY,
     instance,
     writeDiscoveryFile: false,
   });
@@ -264,7 +268,7 @@ test('discovery file contains correct OS-assigned ports', async () => {
   const srv = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'my-secret-key',
+    apiKey: TEST_KEY,
     instance,
     writeDiscoveryFile: true,
   });
@@ -276,7 +280,7 @@ test('discovery file contains correct OS-assigned ports', async () => {
   assert.ok(discovery);
   assert.ok(discovery.httpPort > 0, 'HTTP port should be assigned');
   assert.ok(discovery.wsPort > 0, 'WS port should be assigned');
-  assert.equal(discovery.apiKey, 'my-secret-key');
+  assert.equal(discovery.apiKey, TEST_KEY);
 
   // Verify the ports actually work
   const health = await new Promise<{ status: number; body: unknown }>((resolve) => {

@@ -5,39 +5,43 @@
  */
 
 import http from 'node:http';
-import fs from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
 import net from 'node:net';
 import { getSocketPath } from './native-host.js';
+import {
+  normalizeInstanceName,
+  readDiscovery,
+  validateRelayApiKey,
+} from './discovery.js';
 
-const DISCOVERY_DIR = path.join(os.homedir(), '.chrome-controller');
-const DEFAULT_API_KEY = 'B3C65095-74E1-4F48-9EBB-64F5DD6AB078';
+export { readDiscovery } from './discovery.js';
+
 const DEFAULT_HTTP_PORT = 8898;
 export const SOCKET_PATH = getSocketPath();
 
-export function readDiscovery(instance: string): { httpPort: number; apiKey: string } | null {
-  try {
-    const data = JSON.parse(
-      fs.readFileSync(path.join(DISCOVERY_DIR, `${instance}.json`), 'utf8')
-    ) as { httpPort: number; apiKey: string };
-    return data;
-  } catch {
-    return null;
+function relayPort(value: string | undefined, fallback: number): number {
+  const port = value === undefined ? fallback : Number(value);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    throw new Error('Chrome Controller relay HTTP port must be an integer from 1 to 65535');
   }
+  return port;
 }
 
 export function getConfig(): { httpPort: number; apiKey: string } {
-  if (process.env.HTTP_PORT || process.env.API_KEY) {
+  const instance = normalizeInstanceName(process.env.CHROME_CONTROLLER_INSTANCE || 'default');
+  const discovery = readDiscovery(instance);
+  if (process.env.API_KEY) {
     return {
-      httpPort: Number(process.env.HTTP_PORT || DEFAULT_HTTP_PORT),
-      apiKey: process.env.API_KEY || DEFAULT_API_KEY,
+      httpPort: relayPort(process.env.HTTP_PORT, discovery?.httpPort ?? DEFAULT_HTTP_PORT),
+      apiKey: validateRelayApiKey(process.env.API_KEY),
     };
   }
-  const instance = process.env.CHROME_CONTROLLER_INSTANCE || 'default';
-  const discovery = readDiscovery(instance);
-  if (discovery) return discovery;
-  return { httpPort: DEFAULT_HTTP_PORT, apiKey: DEFAULT_API_KEY };
+  if (process.env.HTTP_PORT) {
+    const httpPort = relayPort(process.env.HTTP_PORT, DEFAULT_HTTP_PORT);
+    if (discovery?.httpPort === httpPort) return { httpPort, apiKey: discovery.apiKey };
+    throw new Error('RELAY_CONFIG_UNAVAILABLE: HTTP_PORT requires API_KEY or a matching private discovery file');
+  }
+  if (discovery) return { httpPort: discovery.httpPort, apiKey: discovery.apiKey };
+  throw new Error('RELAY_CONFIG_UNAVAILABLE: no private Chrome Controller discovery file or explicit API_KEY is available');
 }
 
 function sendIpcCommand(action: string, params: Record<string, unknown> = {}, timeoutMs = 10000): Promise<unknown> {
@@ -77,13 +81,14 @@ function sendIpcCommand(action: string, params: Record<string, unknown> = {}, ti
 
 export async function sendCommand(action: string, params: Record<string, unknown> = {}): Promise<unknown> {
   const allowRelay = process.env.CHROME_CONTROLLER_ALLOW_RELAY === '1' || Boolean(process.env.HTTP_PORT);
+  const nativeOnly = action === 'extractSecretGuarded' || action === 'injectSecretGuarded' || params.sensitive === true;
   const socketPath = getSocketPath();
 
-  if (!process.env.HTTP_PORT) {
+  if (!process.env.HTTP_PORT || nativeOnly) {
     try {
       return await sendIpcCommand(action, params);
     } catch (ipcErr) {
-      if (!allowRelay) {
+      if (nativeOnly || !allowRelay) {
         throw new Error(
           `NATIVE_IPC_UNAVAILABLE: Native Messaging IPC at ${socketPath} is unavailable (${(ipcErr as Error).message}). ` +
           `Zero-ports Native Messaging is the primary protocol. Fallback to network relay requires explicit activation (set CHROME_CONTROLLER_ALLOW_RELAY=1 or HTTP_PORT).`

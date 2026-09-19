@@ -16,7 +16,7 @@
     "generate-store-assets": "npm run generate-store-artwork && npm run capture-store-screenshot",
     "package": "npm run generate-icons && node scripts/package-extension.js",
     "mcp": "node dist/mcp.js",
-    "test": "NODE_ENV=test npx tsx --test src/native-host.test.ts src/server.test.ts src/index.test.ts src/mcp.test.ts src/store-assets.test.ts src/manifest.test.ts src/content-overlay.test.ts",
+    "test": "NODE_ENV=test npx tsx --test src/native-host.test.ts src/server.test.ts src/index.test.ts src/mcp.test.ts src/store-assets.test.ts src/manifest.test.ts src/content-overlay.test.ts src/secure-extraction.test.ts src/extension-background.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src test --max-warnings 0"
   },

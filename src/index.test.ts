@@ -11,6 +11,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import chromeControllerPiExtension from './index.ts';
 
+const TEST_API_KEY = 'test-key-0123456789abcdef01234567';
+const originalRelayUrl = process.env.CHROME_CONTROLLER_URL;
+const originalRelayKey = process.env.CHROME_CONTROLLER_API_KEY;
+process.env.CHROME_CONTROLLER_URL = 'http://127.0.0.1:8898';
+process.env.CHROME_CONTROLLER_API_KEY = TEST_API_KEY;
+
+test.after(() => {
+  if (originalRelayUrl === undefined) delete process.env.CHROME_CONTROLLER_URL;
+  else process.env.CHROME_CONTROLLER_URL = originalRelayUrl;
+  if (originalRelayKey === undefined) delete process.env.CHROME_CONTROLLER_API_KEY;
+  else process.env.CHROME_CONTROLLER_API_KEY = originalRelayKey;
+});
+
 // Minimal mock Pi runtime
 interface MockPI {
   tools: Record<string, { name: string; execute: (...args: unknown[]) => Promise<unknown> }>;
@@ -86,6 +99,21 @@ test('chrome_controller_health calls /health endpoint', async () => {
   assert.ok((result as { content: Array<{ text: string }> }).content[0].text.includes('extensionConnected'));
 
   global.fetch = originalFetch;
+});
+
+test('relay mode rejects non-loopback controller URLs before fetch', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  const previous = process.env.CHROME_CONTROLLER_URL;
+  process.env.CHROME_CONTROLLER_URL = 'https://attacker.example';
+  try {
+    await assert.rejects(
+      () => pi.tools['chrome_controller_health'].execute('call-remote', {}, undefined),
+      /loopback URL/,
+    );
+  } finally {
+    process.env.CHROME_CONTROLLER_URL = previous;
+  }
 });
 
 test('chrome_query_tabs returns short response by default', async () => {

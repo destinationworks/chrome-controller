@@ -123,22 +123,23 @@ pi -e /ABSOLUTE/PATH/TO/chrome-controller/src/index.ts
 
 ---
 
-## 🌐 Standalone Relay Server (Fallback Mode)
+## 🌐 Paired Relay Server (Temporary Fallback Mode)
 
-For environments where Chrome Native Messaging cannot be installed (e.g. headless containers, sandboxed CI runners):
+Start the loopback relay only when Native Messaging is temporarily unavailable:
 
 ```bash
 npm start
 ```
 - Starts HTTP API on `http://127.0.0.1:8898`
 - Starts WebSocket bridge on `ws://127.0.0.1:8899`
+- Generates a fresh high-entropy API key and writes it to the private `0600` discovery file in `~/.chrome-controller/`
 
 Check bridge health:
 ```bash
 curl http://127.0.0.1:8898/health
 ```
 
-The extension will automatically connect to the WebSocket relay server if the Native Messaging host is not registered.
+The extension accepts relay credentials only through its authenticated Native Messaging channel and keeps them in extension session storage. A cold browser session with no working Native Messaging pairing fails closed instead of using a public fallback key. HTTP and Pi/MCP clients either read the private discovery file or provide an explicit key of at least 32 bytes.
 
 ---
 
@@ -146,16 +147,10 @@ The extension will automatically connect to the WebSocket relay server if the Na
 
 - **Dedicated Tab Group (`AI Tool`)**: All controlled tabs are automatically grouped into a prominent cyan tab group labeled `AI Tool`.
 - **Title Prefix**: Controlled tab titles are prefixed with `🤖 ` while under automation.
-- **Zero Open Ports**: In Native Messaging mode, communication uses Chrome stdio framing and an isolated Unix socket (`/tmp/chrome-controller.sock` with `0600` permissions).
-- **Strict Least-Privilege Permissions**: The extension does not request permissions for `cookies`, `history`, or `storage`. It cannot read personal cookies or inspect untargeted tabs.
-- **Cleanup Tabs Command**:
-  ```bash
-  # Close all AI Tool tabs and reset markers
-  curl -X POST http://127.0.0.1:8898 \
-    -H "Content-Type: application/json" \
-    -H "x-api-key: B3C65095-74E1-4F48-9EBB-64F5DD6AB078" \
-    -d '{"action":"cleanupManagedTabs","closeTabs":true}'
-  ```
+- **Zero Open Ports**: In Native Messaging mode, communication uses Chrome stdio framing and an isolated Unix socket (`~/.chrome-controller/run/chrome-controller.sock` with `0600` permissions inside a `0700` directory). The client also rejects non-private socket files or parent directories, and external IPC requests cannot set the reserved `sensitive`, `guardValue`, or `guardTtlSeconds` fields used only by internal guarded flows.
+- **Secure Clipboard Output Guards**: The native Unix-socket host accepts the internal `extractSecretGuarded` integration action. It builds and runs a fused extraction/page-mask expression, suppresses concurrent browser events, then stores TTL-bound raw/JSON-escaped/percent-encoded/derived patterns only in memory before returning the value to Secure Clipboard. Later IPC results, errors, and native event logs are recursively redacted. Protected-tab expiry metadata is mirrored to `chrome.storage.session`, so service-worker or native-host restarts continue to block native, batch, debugger-event, and paired-relay output until expiry. Uncertain failures close the source tab or quarantine further output.
+- **Strict Least-Privilege Permissions**: The extension does not request permissions for `cookies` or `history`. Its `storage` permission is used only for session-scoped relay pairing and protected-tab expiry metadata; that state is not exposed to content scripts and is cleared when the browser session ends.
+- **Cleanup Tabs Command**: Use the `chrome_cleanup_ai_tabs` tool with `closeTabs: true`; relay credentials are never documented or logged as command-line arguments.
 
 ---
 

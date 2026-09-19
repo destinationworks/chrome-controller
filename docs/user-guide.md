@@ -233,7 +233,7 @@ Check health:
 curl http://127.0.0.1:8898/health
 ```
 
-The extension will automatically connect to the WebSocket relay server if the Native Messaging host is not registered.
+The extension connects to the WebSocket relay only after the current browser session has received per-instance credentials through Native Messaging. If a cold session cannot complete that pairing, fallback stays disabled rather than using a shared public key.
 
 ---
 
@@ -242,15 +242,7 @@ The extension will automatically connect to the WebSocket relay server if the Na
 1. **AI Tool Tab Group**: All tabs opened or attached by the agent are placed in a colored Chrome Tab Group labeled **`AI Tool`**.
 2. **Page Title Prefix**: Controlled tab page titles are prefixed with `🤖 `.
 3. **On-Page HUD**: An action bar at the top of the webpage displays current actions in real-time.
-4. **Cleanup Tabs Command**:
-   - Release HUD and group markers:
-     ```bash
-     curl -X POST http://127.0.0.1:8898 -H "Content-Type: application/json" -H "x-api-key: B3C65095-74E1-4F48-9EBB-64F5DD6AB078" -d '{"action":"cleanupManagedTabs"}'
-     ```
-   - Close all AI Tool tabs:
-     ```bash
-     curl -X POST http://127.0.0.1:8898 -H "Content-Type: application/json" -H "x-api-key: B3C65095-74E1-4F48-9EBB-64F5DD6AB078" -d '{"action":"cleanupManagedTabs","closeTabs":true}'
-     ```
+4. **Cleanup Tabs Command**: Use `chrome_cleanup_ai_tabs` to release markers, or pass `closeTabs: true` to close all managed tabs. The relay key remains in private discovery/session state and must not be copied into shell history.
 
 ---
 

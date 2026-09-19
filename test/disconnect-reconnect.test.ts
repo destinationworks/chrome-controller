@@ -22,6 +22,8 @@ import {
   type ChromeControllerServer,
 } from '../src/server.ts';
 
+const TEST_KEY = 'test-key-0123456789abcdef01234567';
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function httpPost(
@@ -117,21 +119,21 @@ test('pending requests are rejected when extension disconnects', async () => {
   const srv = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'test-key',
+    apiKey: TEST_KEY,
     writeDiscoveryFile: false,
   });
 
   await waitForServerReady(srv);
 
   // Connect extension that will NOT reply
-  const ext = await connectExtension(srv.wsPort, 'test-key');
+  const ext = await connectExtension(srv.wsPort, TEST_KEY);
 
   // Send a request with a short timeout
   const { status, body } = await httpPost(
     srv.httpPort,
     '/',
     { action: 'queryTabs', requestTimeoutMs: 500 },
-    'test-key',
+    TEST_KEY,
   );
 
   // Request should timeout because extension never replies
@@ -150,14 +152,14 @@ test('disconnect clears all pending requests immediately', async () => {
   const srv = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'test-key',
+    apiKey: TEST_KEY,
     writeDiscoveryFile: false,
   });
 
   await waitForServerReady(srv);
 
   // Connect extension
-  const ext = await connectExtension(srv.wsPort, 'test-key');
+  const ext = await connectExtension(srv.wsPort, TEST_KEY);
 
   // Start multiple concurrent requests (extension won't reply)
   const requests = Array.from({ length: 5 }, (_, i) =>
@@ -165,7 +167,7 @@ test('disconnect clears all pending requests immediately', async () => {
       srv.httpPort,
       '/',
       { action: `action${i}`, requestTimeoutMs: 10000 },
-      'test-key',
+      TEST_KEY,
     ),
   );
 
@@ -209,14 +211,14 @@ test('no automatic retry after disconnect', async () => {
   const srv = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'test-key',
+    apiKey: TEST_KEY,
     writeDiscoveryFile: false,
   });
 
   await waitForServerReady(srv);
 
   // Connect extension
-  const ext = await connectExtension(srv.wsPort, 'test-key');
+  const ext = await connectExtension(srv.wsPort, TEST_KEY);
 
   // Set up auto-reply
   ext.on('message', (data: Buffer | string) => {
@@ -225,7 +227,7 @@ test('no automatic retry after disconnect', async () => {
   });
 
   // Send a successful request
-  const { body } = await httpPost(srv.httpPort, '/', { action: 'test' }, 'test-key');
+  const { body } = await httpPost(srv.httpPort, '/', { action: 'test' }, TEST_KEY);
   assert.equal((body as { success: boolean })['success'], true);
 
   // Disconnect
@@ -237,7 +239,7 @@ test('no automatic retry after disconnect', async () => {
     srv.httpPort,
     '/',
     { action: 'test' },
-    'test-key',
+    TEST_KEY,
   );
   assert.equal(status, 503);
   assert.ok(
@@ -251,20 +253,20 @@ test('reconnect requires manual client reconnection', async () => {
   const srv = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'test-key',
+    apiKey: TEST_KEY,
     writeDiscoveryFile: false,
   });
 
   await waitForServerReady(srv);
 
   // Connect, disconnect, reconnect cycle
-  const ext1 = await connectExtension(srv.wsPort, 'test-key');
+  const ext1 = await connectExtension(srv.wsPort, TEST_KEY);
   ext1.on('message', (data: Buffer | string) => {
     const msg = JSON.parse(data.toString()) as Record<string, unknown>;
     ext1.send(JSON.stringify({ id: msg['id'], result: 'from-ext1' }));
   });
 
-  const r1 = await httpPost(srv.httpPort, '/', { action: 'test' }, 'test-key');
+  const r1 = await httpPost(srv.httpPort, '/', { action: 'test' }, TEST_KEY);
   assert.equal((r1.body as { result: string })['result'], 'from-ext1');
 
   ext1.close();
@@ -278,13 +280,13 @@ test('reconnect requires manual client reconnection', async () => {
   );
 
   // Reconnect with new WebSocket
-  const ext2 = await connectExtension(srv.wsPort, 'test-key');
+  const ext2 = await connectExtension(srv.wsPort, TEST_KEY);
   ext2.on('message', (data: Buffer | string) => {
     const msg = JSON.parse(data.toString()) as Record<string, unknown>;
     ext2.send(JSON.stringify({ id: msg['id'], result: 'from-ext2' }));
   });
 
-  const r2 = await httpPost(srv.httpPort, '/', { action: 'test' }, 'test-key');
+  const r2 = await httpPost(srv.httpPort, '/', { action: 'test' }, TEST_KEY);
   assert.equal((r2.body as { result: string })['result'], 'from-ext2');
 
   ext2.close();
@@ -325,14 +327,14 @@ test('MV3 service worker termination loses extension state', async () => {
   const srv = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'test-key',
+    apiKey: TEST_KEY,
     writeDiscoveryFile: false,
   });
 
   await waitForServerReady(srv);
 
   // Connect extension
-  const ext = await connectExtension(srv.wsPort, 'test-key');
+  const ext = await connectExtension(srv.wsPort, TEST_KEY);
   ext.on('message', (data: Buffer | string) => {
     const msg = JSON.parse(data.toString()) as Record<string, unknown>;
     ext.send(JSON.stringify({ id: msg['id'], result: { tabId: 123 } }));
@@ -343,7 +345,7 @@ test('MV3 service worker termination loses extension state', async () => {
     srv.httpPort,
     '/',
     { action: 'selectTab', tabId: 123 },
-    'test-key',
+    TEST_KEY,
   );
   assert.equal((r1.body as { success: boolean })['success'], true);
 
@@ -352,7 +354,7 @@ test('MV3 service worker termination loses extension state', async () => {
   await new Promise((r) => setTimeout(r, 100));
 
   // New connection has no state
-  const ext2 = await connectExtension(srv.wsPort, 'test-key');
+  const ext2 = await connectExtension(srv.wsPort, TEST_KEY);
   // The extension's controlledTabId is now null
   // Any pending operations on the previous controlled tab will fail
 

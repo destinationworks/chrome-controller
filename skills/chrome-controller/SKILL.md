@@ -62,9 +62,11 @@ No port or API key environment variables are required when using Native Messagin
 | --------------------------- | ----------------------- | -------------------------------------------- |
 | `HTTP_PORT`                 | `8898`                  | Fallback HTTP API port (relay mode only)     |
 | `WS_PORT`                   | `8899`                  | Fallback WebSocket port (relay mode only)    |
-| `API_KEY`                   | `B3C65095-...`          | Fallback Auth key (relay mode only)          |
-| `CHROME_CONTROLLER_URL`     | `http://127.0.0.1:8898` | Pi fallback: relay base URL                  |
-| `CHROME_CONTROLLER_API_KEY` | _(same as API_KEY)_     | Pi fallback: auth key                        |
+| `API_KEY`                   | random per instance     | Optional explicit relay key, minimum 32 bytes |
+| `CHROME_CONTROLLER_URL`     | private discovery       | Pi fallback: loopback relay base URL only    |
+| `CHROME_CONTROLLER_API_KEY` | private discovery       | Pi fallback: paired/discovered auth key      |
+
+Relay credentials are generated per server instance, saved in a `0600` discovery file inside a `0700` directory, and paired to the extension over Native Messaging. Never copy a relay key into source, prompts, logs, or command history. A cold extension session without a native pairing must fail closed.
 
 ## Workflow
 

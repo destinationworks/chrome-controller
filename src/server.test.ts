@@ -14,13 +14,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
+const TEST_API_KEY = 'test-key-0123456789abcdef01234567';
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 async function createServer(config?: Partial<ServerConfig>): Promise<ChromeControllerServer> {
   const srv = createChromeControllerServer({
     httpPort: 0,
     wsPort: 0,
-    apiKey: 'test-key',
+    apiKey: TEST_API_KEY,
     writeDiscoveryFile: false,
     ...config
   });
@@ -28,7 +30,7 @@ async function createServer(config?: Partial<ServerConfig>): Promise<ChromeContr
   return srv;
 }
 
-function post(server: { httpPort: number }, body: unknown, apiKey: string = 'test-key', extraHeaders: Record<string, string> = {}): Promise<any> {
+function post(server: { httpPort: number }, body: unknown, apiKey: string = TEST_API_KEY, extraHeaders: Record<string, string> = {}): Promise<any> {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body);
     const headers: Record<string, string> = { 'Content-Type': 'application/json', ...extraHeaders };
@@ -91,7 +93,7 @@ function get(server: { httpPort: number }, urlPath: string = '/'): Promise<any> 
 // Mock extension that responds to known actions like real background.js
 function connectMockExtension(server: { wsPort: number }): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${server.wsPort}?key=test-key`);
+    const ws = new WebSocket(`ws://127.0.0.1:${server.wsPort}?key=${TEST_API_KEY}`);
     ws.on('error', reject);
     ws.on('message', (data: Buffer | string) => {
       try {
@@ -121,7 +123,7 @@ function connectMockExtension(server: { wsPort: number }): Promise<WebSocket> {
 }
 
 function connectExtension(server: { wsPort: number }): Promise<WebSocket> {
-  const ws = new WebSocket(`ws://127.0.0.1:${server.wsPort}?key=test-key`);
+  const ws = new WebSocket(`ws://127.0.0.1:${server.wsPort}?key=${TEST_API_KEY}`);
   return new Promise((resolve, reject) => {
     ws.on('open', () => resolve(ws));
     ws.on('error', reject);
@@ -182,6 +184,131 @@ test.describe('Server - Basic', () => {
   });
 
   test.it('closes gracefully', () => {
+    server.close();
+  });
+});
+
+test.describe('Server - Relay hardening', () => {
+  test.it('generates a different high-entropy API key for every unconfigured instance', async () => {
+    const first = createChromeControllerServer({ httpPort: 0, wsPort: 0, writeDiscoveryFile: false });
+    const second = createChromeControllerServer({ httpPort: 0, wsPort: 0, writeDiscoveryFile: false });
+    await Promise.all([first.ready, second.ready]);
+    assert.ok(Buffer.byteLength(first.apiKey, 'utf8') >= 32);
+    assert.ok(Buffer.byteLength(second.apiKey, 'utf8') >= 32);
+    assert.notEqual(first.apiKey, second.apiKey);
+    first.close();
+    second.close();
+  });
+
+  test.it('rejects weak explicit API keys', () => {
+    assert.throws(
+      () => createChromeControllerServer({ httpPort: 0, wsPort: 0, apiKey: 'short', writeDiscoveryFile: false }),
+      /at least 32 bytes/,
+    );
+  });
+
+  test.it('rejects invalid resource limits and port configuration before opening listeners', () => {
+    for (const config of [
+      { maxBodyBytes: 0 },
+      { maxBodyBytes: Number.NaN },
+      { defaultTimeoutMs: 0 },
+      { defaultTimeoutMs: 120001 },
+      { maxBatchActions: 0 },
+      { maxBatchActions: 1001 },
+      { httpPort: -1 },
+      { wsPort: 65536 },
+    ]) {
+      assert.throws(
+        () => createChromeControllerServer({ ...config, apiKey: TEST_API_KEY, writeDiscoveryFile: false }),
+        /must be an integer/,
+      );
+    }
+  });
+
+  test.it('rejects ready and closes listeners when discovery publication fails', async () => {
+    const instance = `discovery-failure-${Date.now()}`;
+    const blocker = path.join(os.homedir(), '.chrome-controller', `${instance}.json`);
+    fs.mkdirSync(path.dirname(blocker), { recursive: true, mode: 0o700 });
+    fs.mkdirSync(blocker);
+    const server = createChromeControllerServer({
+      instance,
+      httpPort: 0,
+      wsPort: 0,
+      apiKey: TEST_API_KEY,
+    });
+    try {
+      await assert.rejects(server.ready, /discovery publication failed/);
+      await delay(25);
+      assert.equal(server.server.listening, false);
+      assert.equal(server.wss.address(), null);
+    } finally {
+      server.close();
+      fs.rmSync(blocker, { recursive: true, force: true });
+    }
+  });
+
+  test.it('failed same-instance startup cannot remove the active server discovery record', async () => {
+    const instance = `discovery-owner-${Date.now()}`;
+    const first = createChromeControllerServer({
+      instance,
+      httpPort: 0,
+      wsPort: 0,
+      apiKey: TEST_API_KEY,
+    });
+    await first.ready;
+    const expected = readDiscovery(instance);
+    assert.ok(expected);
+
+    const second = createChromeControllerServer({
+      instance,
+      httpPort: 0,
+      wsPort: first.wsPort,
+      apiKey: 'second-key-0123456789abcdef0123456',
+    });
+    try {
+      await assert.rejects(second.ready, /already in use/);
+      second.close();
+      assert.deepEqual(readDiscovery(instance), expected);
+      assert.equal(first.server.listening, true);
+    } finally {
+      second.close();
+      first.close();
+    }
+    assert.equal(readDiscovery(instance), null);
+  });
+
+  test.it('rejects HTTP requests with a non-loopback Host header', async () => {
+    const server = await createServer();
+    const res = await post(server, { action: 'queryTabs' }, TEST_API_KEY, { host: 'attacker.example' });
+    assert.equal(res.status, 403);
+    assert.match(res.body.error, /Host or Origin/);
+    server.close();
+  });
+
+  test.it('rejects HTTP requests with an untrusted Origin and allows an extension Origin', async () => {
+    const server = await createServer();
+    const rejected = await post(server, { action: 'queryTabs' }, TEST_API_KEY, { origin: 'https://attacker.example' });
+    assert.equal(rejected.status, 403);
+    const allowed = await post(server, { action: 'queryTabs' }, TEST_API_KEY, {
+      origin: `chrome-extension://${'a'.repeat(32)}`,
+    });
+    assert.equal(allowed.status, 503);
+    server.close();
+  });
+
+  test.it('rejects WebSocket connections with invalid Host or Origin headers', async () => {
+    const server = await createServer();
+    for (const headers of [
+      { Host: 'attacker.example' },
+      { Origin: 'https://attacker.example' },
+    ]) {
+      const ws = new WebSocket(`ws://127.0.0.1:${server.wsPort}?key=${TEST_API_KEY}`, { headers });
+      const { code, reason } = await new Promise<{ code: number; reason: string }>((resolve) => {
+        ws.on('close', (closeCode, closeReason) => resolve({ code: closeCode, reason: closeReason.toString() }));
+      });
+      assert.equal(code, 1008);
+      assert.match(reason, /Host or Origin/);
+    }
     server.close();
   });
 });
@@ -257,7 +384,7 @@ test.describe('Server - Connection Rejection', () => {
 
   test.it('accepts new connection after previous disconnects', async () => {
     server = await createServer();
-    const w = new WebSocket(`ws://127.0.0.1:${server.wsPort}?key=test-key`);
+    const w = new WebSocket(`ws://127.0.0.1:${server.wsPort}?key=${TEST_API_KEY}`);
     await new Promise<void>((resolve) => {
       w.on('open', () => w.close());
       w.on('close', () => resolve());
@@ -329,17 +456,17 @@ test.describe('Server - Extension Close Events', () => {
 
 test.describe('Server - Discovery', () => {
   test.it('writes and reads discovery file', () => {
-    const info = { httpPort: 9999, wsPort: 9998, apiKey: 'secret', pid: process.pid, startedAt: new Date().toISOString() };
+    const info = { httpPort: 9999, wsPort: 9998, apiKey: TEST_API_KEY, pid: process.pid, startedAt: new Date().toISOString() };
     writeDiscovery('test', info);
     const read = readDiscovery('test');
     assert.equal(read?.httpPort, 9999);
     assert.equal(read?.wsPort, 9998);
-    assert.equal(read?.apiKey, 'secret');
+    assert.equal(read?.apiKey, TEST_API_KEY);
     removeDiscovery('test');
   });
 
   test.it('creates directory if it does not exist', () => {
-    const info = { httpPort: 1111, wsPort: 1112, apiKey: 'k', pid: process.pid, startedAt: new Date().toISOString() };
+    const info = { httpPort: 1111, wsPort: 1112, apiKey: TEST_API_KEY, pid: process.pid, startedAt: new Date().toISOString() };
     writeDiscovery('disc-nested', info);
     const read = readDiscovery('disc-nested');
     assert.equal(read?.httpPort, 1111);
@@ -348,6 +475,46 @@ test.describe('Server - Discovery', () => {
 
   test.it('removes non-existent discovery file without error', () => {
     removeDiscovery('does-not-exist-12345');
+  });
+
+  test.it('writes discovery state atomically with private directory and file permissions', () => {
+    const instance = `permissions-${Date.now()}`;
+    const info = { httpPort: 2221, wsPort: 2222, apiKey: TEST_API_KEY, pid: process.pid, startedAt: new Date().toISOString() };
+    writeDiscovery(instance, info);
+    const directoryMode = fs.statSync(path.join(os.homedir(), '.chrome-controller')).mode & 0o777;
+    const fileMode = fs.statSync(path.join(os.homedir(), '.chrome-controller', `${instance}.json`)).mode & 0o777;
+    assert.equal(directoryMode, 0o700);
+    assert.equal(fileMode, 0o600);
+    removeDiscovery(instance);
+  });
+
+  test.it('rejects traversal and malformed instance names', () => {
+    const info = { httpPort: 2221, wsPort: 2222, apiKey: TEST_API_KEY, pid: process.pid, startedAt: new Date().toISOString() };
+    assert.throws(() => writeDiscovery('../escape', info), /instance/);
+    assert.equal(readDiscovery('../escape'), null);
+  });
+
+  test.it('refuses discovery files readable by group or other users', () => {
+    if (process.platform === 'win32') return;
+    const instance = `insecure-mode-${Date.now()}`;
+    const info = { httpPort: 2221, wsPort: 2222, apiKey: TEST_API_KEY, pid: process.pid, startedAt: new Date().toISOString() };
+    writeDiscovery(instance, info);
+    const file = path.join(os.homedir(), '.chrome-controller', `${instance}.json`);
+    fs.chmodSync(file, 0o644);
+    assert.equal(readDiscovery(instance), null);
+    removeDiscovery(instance);
+  });
+
+  test.it('removes a discovery record only when the caller owns its exact contents', () => {
+    const instance = `conditional-remove-${Date.now()}`;
+    const first = { httpPort: 2231, wsPort: 2232, apiKey: TEST_API_KEY, pid: process.pid, startedAt: new Date().toISOString() };
+    const replacement = { ...first, apiKey: 'replacement-key-0123456789abcdef0123' };
+    writeDiscovery(instance, first);
+    writeDiscovery(instance, replacement);
+    removeDiscovery(instance, first);
+    assert.deepEqual(readDiscovery(instance), replacement);
+    removeDiscovery(instance, replacement);
+    assert.equal(readDiscovery(instance), null);
   });
 });
 
@@ -505,7 +672,7 @@ test.describe('Server - Discovery Directory Creation', () => {
   test.it('creates discovery directory if missing', () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-disc2-'));
     const _nested = path.join(tmpDir, 'sub', 'dir');
-    const info = { httpPort: 1111, wsPort: 1112, apiKey: 'k', pid: process.pid, startedAt: new Date().toISOString() };
+    const info = { httpPort: 1111, wsPort: 1112, apiKey: TEST_API_KEY, pid: process.pid, startedAt: new Date().toISOString() };
     writeDiscovery('disc-dir-test', info);
     const read = readDiscovery('disc-dir-test');
     assert.equal(read?.httpPort, 1111);
@@ -532,6 +699,18 @@ test.describe('Server - Request Timeout', () => {
     await delay(100);
     server.close();
   });
+
+  test.it('rejects invalid per-request timeouts without forwarding the command', async () => {
+    server = await createServer();
+    ext = await connectMockExtension(server);
+    for (const timeoutMs of [0, -1, 1.5, 120001, '10']) {
+      const res = await post(server, { action: 'queryTabs', timeoutMs });
+      assert.equal(res.status, 400);
+      assert.match(String(res.body.error), /Request timeout must be an integer/);
+    }
+    ext.close();
+    server.close();
+  });
 });
 
 test.describe('Server - Invalid JSON Payload', () => {
@@ -546,7 +725,7 @@ test.describe('Server - Invalid JSON Payload', () => {
           port: server.httpPort,
           path: '/',
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-api-key': 'test-key' },
+          headers: { 'Content-Type': 'application/json', 'x-api-key': TEST_API_KEY },
         },
         (httpRes) => {
           const chunks: Buffer[] = [];
@@ -575,7 +754,7 @@ test.describe('Server - Bearer Token Auth', () => {
 
   test.it('accepts Bearer token in Authorization header', async () => {
     server = await createServer();
-    const res = await post(server, { action: 'queryTabs' }, '', { authorization: 'Bearer test-key' });
+    const res = await post(server, { action: 'queryTabs' }, '', { authorization: `Bearer ${TEST_API_KEY}` });
     assert.equal(res.status, 503);
     server.close();
   });

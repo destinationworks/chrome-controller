@@ -28,6 +28,8 @@ import {
   type ChromeControllerServer,
 } from '../src/server.ts';
 
+const TEST_KEY = 'test-key-0123456789abcdef01234567';
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function httpPost(
@@ -105,14 +107,14 @@ test('server request hangs when extension drops connection mid-request', async (
   const srv = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'test-key',
+    apiKey: TEST_KEY,
     writeDiscoveryFile: false,
   });
 
   await waitForServerReady(srv);
 
   // Connect extension that will disconnect before replying
-  const ext = await connectExtension(srv.wsPort, 'test-key');
+  const ext = await connectExtension(srv.wsPort, TEST_KEY);
 
   // Extension receives the message but disconnects before sending response
   ext.on('message', () => {
@@ -125,7 +127,7 @@ test('server request hangs when extension drops connection mid-request', async (
     srv.httpPort,
     '/',
     { action: 'queryTabs', requestTimeoutMs: 500 },
-    'test-key',
+    TEST_KEY,
   );
 
   assert.equal(status, 400);
@@ -180,14 +182,14 @@ test('batch request partial failure when extension disconnects mid-batch', async
   const srv = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'test-key',
+    apiKey: TEST_KEY,
     writeDiscoveryFile: false,
   });
 
   await waitForServerReady(srv);
 
   // Connect extension
-  const ext = await connectExtension(srv.wsPort, 'test-key');
+  const ext = await connectExtension(srv.wsPort, TEST_KEY);
 
   let messageCount = 0;
   ext.on('message', (data: Buffer | string) => {
@@ -210,11 +212,11 @@ test('batch request partial failure when extension disconnects mid-batch', async
     {
       mode: 'sequential',
       actions: [
-        { action: 'action1', requestTimeoutMs: 500 },
-        { action: 'action2', requestTimeoutMs: 500 },
+        { action: 'queryTabs', requestTimeoutMs: 500 },
+        { action: 'navigate', requestTimeoutMs: 500 },
       ],
     },
-    'test-key',
+    TEST_KEY,
   );
 
   const b = body as { results?: Array<{ success: boolean; error?: string }> };
@@ -235,13 +237,13 @@ test('parallel batch loses responses when extension disconnects', async () => {
   const srv = createChromeControllerServer({
     wsPort: 0,
     httpPort: 0,
-    apiKey: 'test-key',
+    apiKey: TEST_KEY,
     writeDiscoveryFile: false,
   });
 
   await waitForServerReady(srv);
 
-  const ext = await connectExtension(srv.wsPort, 'test-key');
+  const ext = await connectExtension(srv.wsPort, TEST_KEY);
 
   let messageCount = 0;
   ext.on('message', () => {
@@ -259,12 +261,12 @@ test('parallel batch loses responses when extension disconnects', async () => {
     {
       mode: 'parallel',
       actions: [
-        { action: 'a1', requestTimeoutMs: 500 },
-        { action: 'a2', requestTimeoutMs: 500 },
-        { action: 'a3', requestTimeoutMs: 500 },
+        { action: 'queryTabs', requestTimeoutMs: 500 },
+        { action: 'navigate', requestTimeoutMs: 500 },
+        { action: 'click', requestTimeoutMs: 500 },
       ],
     },
-    'test-key',
+    TEST_KEY,
   );
 
   const b = body as { results: Array<{ success: boolean }> };

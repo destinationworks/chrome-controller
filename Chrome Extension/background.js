@@ -1,5 +1,3 @@
-const API_KEY = 'B3C65095-74E1-4F48-9EBB-64F5DD6AB078';
-const WS_URL = 'ws://127.0.0.1:8899/?key=' + API_KEY;
 const NATIVE_HOST_NAME = 'com.dst.chrome_controller';
 const CONTROLLED_GROUP_TITLE = 'AI Tool';
 const CONTROLLED_GROUP_COLOR = 'cyan';
@@ -7,12 +5,161 @@ const RECONNECT_ALARM = 'reconnect';
 const RECONNECT_INTERVAL_MIN = 1;
 const KEEPALIVE_ALARM = 'keepalive';
 const KEEPALIVE_INTERVAL_MIN = 1;
+const RELAY_CONFIG_STORAGE_KEY = 'chromeControllerRelayConfig';
+const PROTECTED_TAB_GUARDS_STORAGE_KEY = 'chromeControllerProtectedTabGuards';
+const PROTECTED_TAB_ALARM_PREFIX = 'protected-tab:';
+const MAX_GUARD_TTL_SECONDS = 24 * 60 * 60;
+const MIN_RELAY_KEY_BYTES = 32;
 
 let socket = null;
+let sensitiveActionDepth = 0;
+let protectedTabGuards = new Map();
+let protectedTabStateUnavailable = false;
+let relayConfig = null;
+let relayConfigGeneration = 0;
 let nativePort = null;
 let controlledTabId = null;
 let controlledGroupIdsByWindow = new Map();
 let overlayHidden = false;
+const protectedTabGuardsReady = restoreProtectedTabGuards();
+const relayConfigReady = restoreRelayConfig();
+
+function validRelayConfig(value) {
+  return Boolean(
+    value &&
+    Number.isSafeInteger(value.wsPort) &&
+    value.wsPort >= 1 &&
+    value.wsPort <= 65535 &&
+    typeof value.apiKey === 'string' &&
+    new TextEncoder().encode(value.apiKey).length >= MIN_RELAY_KEY_BYTES
+  );
+}
+
+async function restoreRelayConfig() {
+  try {
+    const stored = await chrome.storage.session.get(RELAY_CONFIG_STORAGE_KEY);
+    const candidate = stored[RELAY_CONFIG_STORAGE_KEY];
+    relayConfig = validRelayConfig(candidate) ? candidate : null;
+    if (candidate && !relayConfig) await chrome.storage.session.remove(RELAY_CONFIG_STORAGE_KEY);
+  } catch {
+    relayConfig = null;
+    console.error('Relay configuration could not be restored; relay fallback remains disabled');
+  }
+}
+
+async function configureRelay(value) {
+  await relayConfigReady;
+  const nextConfig = validRelayConfig(value)
+    ? {
+        instance: typeof value.instance === 'string' ? value.instance : 'default',
+        wsPort: value.wsPort,
+        apiKey: value.apiKey,
+        pid: value.pid,
+        startedAt: value.startedAt,
+      }
+    : null;
+  const changed = !relayConfig || !nextConfig ||
+    relayConfig.wsPort !== nextConfig.wsPort ||
+    relayConfig.apiKey !== nextConfig.apiKey ||
+    relayConfig.instance !== nextConfig.instance;
+
+  if (changed) {
+    relayConfigGeneration += 1;
+    const oldSocket = socket;
+    socket = null;
+    if (oldSocket) {
+      oldSocket.onopen = null;
+      oldSocket.onmessage = null;
+      oldSocket.onclose = null;
+      oldSocket.onerror = null;
+      try { oldSocket.close(); } catch (_) {}
+    }
+  }
+
+  relayConfig = nextConfig;
+  if (!nextConfig) {
+    await chrome.storage.session.remove(RELAY_CONFIG_STORAGE_KEY);
+    return;
+  }
+  await chrome.storage.session.set({ [RELAY_CONFIG_STORAGE_KEY]: relayConfig });
+}
+
+async function restoreProtectedTabGuards() {
+  try {
+    const stored = await chrome.storage.session.get(PROTECTED_TAB_GUARDS_STORAGE_KEY);
+    const entries = stored[PROTECTED_TAB_GUARDS_STORAGE_KEY];
+    const now = Date.now();
+    const restored = new Map();
+    if (entries && typeof entries === 'object' && !Array.isArray(entries)) {
+      for (const [tabIdText, expiresAt] of Object.entries(entries)) {
+        const tabId = Number(tabIdText);
+        if (Number.isSafeInteger(tabId) && tabId > 0 && Number.isFinite(expiresAt) && expiresAt > now) {
+          restored.set(tabId, expiresAt);
+        }
+      }
+    }
+    protectedTabGuards = restored;
+    protectedTabStateUnavailable = false;
+    await persistProtectedTabGuards();
+  } catch {
+    protectedTabStateUnavailable = true;
+    console.error('Protected-tab state could not be restored; browser output remains locked');
+  }
+}
+
+async function persistProtectedTabGuards() {
+  const entries = Object.create(null);
+  for (const [tabId, expiresAt] of protectedTabGuards) entries[String(tabId)] = expiresAt;
+  await chrome.storage.session.set({ [PROTECTED_TAB_GUARDS_STORAGE_KEY]: entries });
+}
+
+function guardTtlSeconds(value) {
+  const ttl = value === undefined ? 300 : value;
+  if (!Number.isSafeInteger(ttl) || ttl < 1 || ttl > MAX_GUARD_TTL_SECONDS) {
+    throw new Error(`Protected-tab TTL must be an integer from 1 to ${MAX_GUARD_TTL_SECONDS} seconds`);
+  }
+  return ttl;
+}
+
+async function reserveProtectedTab(tabIdValue, ttlValue) {
+  await protectedTabGuardsReady;
+  if (protectedTabStateUnavailable) throw new Error('Protected-tab state is unavailable');
+  const tabId = Number(tabIdValue);
+  if (!Number.isSafeInteger(tabId) || tabId <= 0) throw new Error('Protected-tab guard requires a valid tabId');
+  const ttlSeconds = guardTtlSeconds(ttlValue);
+  const priorExpiresAt = protectedTabGuards.get(tabId) ?? 0;
+  const reservationExpiresAt = Math.max(
+    priorExpiresAt,
+    Date.now() + MAX_GUARD_TTL_SECONDS * 1000,
+  );
+  protectedTabGuards.set(tabId, reservationExpiresAt);
+  await persistProtectedTabGuards();
+  await chrome.alarms.create(`${PROTECTED_TAB_ALARM_PREFIX}${tabId}`, { when: reservationExpiresAt });
+  return { tabId, ttlSeconds, priorExpiresAt, reservationExpiresAt };
+}
+
+async function finalizeProtectedTab(reservation) {
+  if (!reservation) return;
+  await protectedTabGuardsReady;
+  if (protectedTabStateUnavailable) throw new Error('Protected-tab state is unavailable');
+  if (protectedTabGuards.get(reservation.tabId) !== reservation.reservationExpiresAt) return;
+  const expiresAt = Math.max(
+    reservation.priorExpiresAt,
+    Date.now() + reservation.ttlSeconds * 1000,
+  );
+  protectedTabGuards.set(reservation.tabId, expiresAt);
+  await persistProtectedTabGuards();
+  await chrome.alarms.create(`${PROTECTED_TAB_ALARM_PREFIX}${reservation.tabId}`, { when: expiresAt });
+}
+
+async function unprotectTab(tabIdValue) {
+  await protectedTabGuardsReady;
+  const tabId = Number(tabIdValue);
+  if (!Number.isSafeInteger(tabId) || tabId <= 0) return;
+  protectedTabGuards.delete(tabId);
+  await persistProtectedTabGuards();
+  await chrome.alarms.clear(`${PROTECTED_TAB_ALARM_PREFIX}${tabId}`);
+}
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'setOverlayHidden') {
@@ -25,6 +172,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       success: true,
       nativeConnected: Boolean(nativePort),
       wsConnected: Boolean(socket && socket.readyState === WebSocket.OPEN),
+      relayPaired: Boolean(relayConfig),
       extensionId: chrome.runtime.id,
       controlledTabId,
     });
@@ -43,6 +191,14 @@ function connectNative() {
 
     nativePort.onMessage.addListener(async (msg) => {
       try {
+        if (msg?.event === 'relayConfig') {
+          await configureRelay(msg.relay);
+          return;
+        }
+        if (msg?.event === 'relayConfigUnavailable') {
+          await configureRelay(null);
+          return;
+        }
         await handleNativeMessage(msg);
       } catch (e) {
         console.error('Error handling native message:', e);
@@ -54,11 +210,13 @@ function connectNative() {
       nativePort = null;
       scheduleReconnect();
       // Fallback to WebSocket if native host is unavailable
-      connectWs();
+      void connectWs();
     });
+
+    nativePort.postMessage({ action: 'getRelayConfig' });
   } catch (err) {
     console.warn('Native messaging connect failed, falling back to WS:', err);
-    connectWs();
+    void connectWs();
   }
 }
 
@@ -69,19 +227,78 @@ function sendNativeResponse(id, payload) {
 }
 
 async function handleNativeMessage(message) {
+  await protectedTabGuardsReady;
   const { id, action, ...params } = message;
+  const sensitive = params.sensitive === true;
+  const recoveryClose = sensitive && action === 'removeTab';
+  if (protectedTabStateUnavailable && !recoveryClose) {
+    sendNativeResponse(id, { error: 'Browser output is locked because protected-tab state is unavailable' });
+    return;
+  }
+  if (!sensitive && hasActiveProtectedTabs()) {
+    sendNativeResponse(id, { error: 'Browser output is locked while a protected secret tab is active' });
+    return;
+  }
+  if (!sensitive && sensitiveActionDepth > 0) {
+    sendNativeResponse(id, { error: 'Browser output is locked during guarded extraction' });
+    return;
+  }
+  if (sensitive && !recoveryClose && sensitiveActionDepth > 0) {
+    sendNativeResponse(id, { error: 'Sensitive browser action failed; details suppressed' });
+    return;
+  }
+  const tracksSensitiveAction = sensitive && !recoveryClose;
+  if (tracksSensitiveAction) sensitiveActionDepth += 1;
+  let reservation = null;
   try {
+    if (sensitive && !recoveryClose && Number.isInteger(Number(params.tabId))) {
+      const ttlSeconds = params.guardTtlSeconds ?? params.ttlSeconds ?? 300;
+      try {
+        reservation = await reserveProtectedTab(params.tabId, ttlSeconds);
+      } catch {
+        protectedTabStateUnavailable = true;
+        throw new Error('Protected-tab reservation failed');
+      }
+    }
     const result = await executeAction(action, params);
+    if (reservation) {
+      try {
+        await finalizeProtectedTab(reservation);
+      } catch {
+        protectedTabStateUnavailable = true;
+        throw new Error('Protected-tab finalization failed');
+      }
+    }
     sendNativeResponse(id, { result });
   } catch (err) {
-    console.error(`Error executing native action ${action}:`, err);
-    sendNativeResponse(id, { error: err.toString() });
+    if (reservation && !protectedTabStateUnavailable) {
+      try {
+        await finalizeProtectedTab(reservation);
+      } catch {
+        protectedTabStateUnavailable = true;
+      }
+    }
+    if (sensitive) {
+      console.error(`Sensitive native action ${action} failed; details suppressed`);
+      sendNativeResponse(id, { error: 'Sensitive browser action failed; details suppressed' });
+    } else {
+      console.error(`Error executing native action ${action}:`, err);
+      sendNativeResponse(id, { error: err.toString() });
+    }
+  } finally {
+    if (tracksSensitiveAction) sensitiveActionDepth -= 1;
   }
 }
 
 // ── WebSocket Fallback ────────────────────────────────────────────────────────
 
-function connectWs() {
+async function connectWs() {
+  await relayConfigReady;
+  if (!relayConfig) {
+    console.warn('Relay fallback is not paired; waiting for Native Messaging configuration');
+    scheduleReconnect();
+    return;
+  }
   if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN)) {
     return;
   }
@@ -89,34 +306,41 @@ function connectWs() {
     try { socket.onclose = null; socket.close(); } catch (_) {}
   }
 
-  console.log('Attempting WebSocket connection to ' + WS_URL);
-  socket = new WebSocket(WS_URL);
+  console.log('Attempting paired loopback WebSocket connection');
+  const wsUrl = `ws://127.0.0.1:${relayConfig.wsPort}/?key=${encodeURIComponent(relayConfig.apiKey)}`;
+  const generation = relayConfigGeneration;
+  const candidateSocket = new WebSocket(wsUrl);
+  socket = candidateSocket;
 
-  socket.onopen = () => {
+  candidateSocket.onopen = () => {
+    if (socket !== candidateSocket || generation !== relayConfigGeneration) return;
     console.log('Connected to local WebSocket server');
     try { chrome.alarms.clear(RECONNECT_ALARM); } catch (_) {}
     scheduleKeepaliveAlarm();
   };
 
-  socket.onmessage = async (event) => {
+  candidateSocket.onmessage = async (event) => {
+    if (socket !== candidateSocket || generation !== relayConfigGeneration) return;
     try {
       const data = JSON.parse(event.data);
-      await handleWsMessage(data);
+      await handleWsMessage(data, candidateSocket, generation);
     } catch (e) {
       console.error('Error parsing message:', e);
     }
   };
 
-  socket.onclose = () => {
+  candidateSocket.onclose = () => {
+    if (socket !== candidateSocket || generation !== relayConfigGeneration) return;
     console.log('Disconnected from local WebSocket server');
     try { chrome.alarms.clear(RECONNECT_ALARM); } catch (_) {}
     socket = null;
     scheduleReconnect();
   };
 
-  socket.onerror = (error) => {
+  candidateSocket.onerror = (error) => {
+    if (socket !== candidateSocket || generation !== relayConfigGeneration) return;
     console.error('WebSocket error:', error);
-    socket.close();
+    candidateSocket.close();
   };
 }
 
@@ -132,7 +356,7 @@ function scheduleKeepaliveAlarm() {
   } catch (_) {}
 }
 
-chrome.alarms.onAlarm.addListener((alarm) => {
+chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === KEEPALIVE_ALARM) {
     scheduleKeepaliveAlarm();
     if (socket && socket.readyState === WebSocket.OPEN) {
@@ -142,12 +366,29 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     if (!nativePort && (!socket || socket.readyState !== WebSocket.OPEN)) {
       connectNative();
     }
+  } else if (alarm.name.startsWith(PROTECTED_TAB_ALARM_PREFIX)) {
+    await protectedTabGuardsReady;
+    const tabId = Number(alarm.name.slice(PROTECTED_TAB_ALARM_PREFIX.length));
+    if (!Number.isSafeInteger(tabId)) return;
+    const expiresAt = protectedTabGuards.get(tabId);
+    if (!expiresAt) return;
+    if (expiresAt > Date.now()) {
+      await chrome.alarms.create(alarm.name, { when: expiresAt });
+      return;
+    }
+    await unprotectTab(tabId);
   }
 });
 
-function sendSocketResponse(id, payload) {
-  if (socket && socket.readyState === WebSocket.OPEN && id) {
-    socket.send(JSON.stringify({ id, ...payload }));
+function sendSocketResponse(id, payload, targetSocket = socket, generation = relayConfigGeneration) {
+  if (
+    targetSocket &&
+    targetSocket === socket &&
+    generation === relayConfigGeneration &&
+    targetSocket.readyState === WebSocket.OPEN &&
+    id
+  ) {
+    targetSocket.send(JSON.stringify({ id, ...payload }));
   }
 }
 
@@ -412,6 +653,9 @@ async function runBatch(actions, options = {}) {
       throw new Error(`Batch item ${index} specifies disallowed action "${item.action}"`);
     }
     const { action, ...params } = item;
+    if (isProtectedTab(params.tabId)) {
+      throw new Error(`Batch item ${index} targets a protected secret tab`);
+    }
     return { action, params };
   });
 
@@ -675,18 +919,36 @@ async function executeAction(action, params = {}) {
   return result;
 }
 
-async function handleWsMessage(message) {
+async function handleWsMessage(message, targetSocket = socket, generation = relayConfigGeneration) {
+  await protectedTabGuardsReady;
+  if (targetSocket !== socket || generation !== relayConfigGeneration) return;
   const { id, action, ...params } = message;
+  if (protectedTabStateUnavailable) {
+    sendSocketResponse(id, { error: 'Browser output is locked because protected-tab state is unavailable' }, targetSocket, generation);
+    return;
+  }
+  if (hasActiveProtectedTabs()) {
+    sendSocketResponse(id, { error: 'Browser output is locked while a protected secret tab is active' }, targetSocket, generation);
+    return;
+  }
+  if (sensitiveActionDepth > 0) {
+    sendSocketResponse(id, { error: 'Browser output is locked during guarded extraction' }, targetSocket, generation);
+    return;
+  }
   try {
     const result = await executeAction(action, params);
-    sendSocketResponse(id, { result });
+    sendSocketResponse(id, { result }, targetSocket, generation);
   } catch (err) {
     console.error(`Error executing action ${action}:`, err);
-    sendSocketResponse(id, { error: err.toString() });
+    sendSocketResponse(id, { error: err.toString() }, targetSocket, generation);
   }
 }
 
-chrome.debugger.onEvent.addListener((source, method, params) => {
+chrome.debugger.onEvent.addListener(async (source, method, params) => {
+  await protectedTabGuardsReady;
+  if (protectedTabStateUnavailable) return;
+  if (sensitiveActionDepth > 0) return;
+  if (isProtectedTab(source.tabId)) return;
   const eventObj = { event: 'debuggerEvent', source, method, params };
   if (nativePort) {
     nativePort.postMessage(eventObj);
@@ -696,11 +958,32 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   }
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => {
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  try { await unprotectTab(tabId); } catch { protectedTabStateUnavailable = true; }
   if (controlledTabId === tabId) {
     controlledTabId = null;
   }
 });
+
+function isProtectedTab(tabId) {
+  if (!Number.isInteger(Number(tabId))) return false;
+  const id = Number(tabId);
+  const expiresAt = protectedTabGuards.get(id);
+  if (!expiresAt) return false;
+  if (expiresAt <= Date.now()) {
+    protectedTabGuards.delete(id);
+    void persistProtectedTabGuards().catch(() => { protectedTabStateUnavailable = true; });
+    return false;
+  }
+  return true;
+}
+
+function hasActiveProtectedTabs() {
+  for (const tabId of protectedTabGuards.keys()) {
+    if (isProtectedTab(tabId)) return true;
+  }
+  return false;
+}
 
 chrome.tabGroups.onRemoved.addListener((group) => {
   if (group.title === CONTROLLED_GROUP_TITLE) {

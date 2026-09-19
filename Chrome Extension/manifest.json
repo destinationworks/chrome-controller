@@ -19,6 +19,7 @@
     "debugger",
     "tabGroups",
     "alarms",
+    "storage",
     "nativeMessaging"
   ],
   "background": {
