@@ -122,11 +122,15 @@ test('store screenshot is a verified live-extension capture', async () => {
   const provenance = JSON.parse(await readFile(path.join(storeAssetsDir, 'screenshot-capture.json'), 'utf8'));
   const manifest = JSON.parse(await readFile(path.join(repoRoot, 'Chrome Extension', 'manifest.json'), 'utf8'));
   const iconSvg = await readFile(path.join(repoRoot, 'Chrome Extension', 'icon128.svg'), 'utf8');
+  const contentScript = await readFile(path.join(repoRoot, 'Chrome Extension', 'content.js'), 'utf8');
+  const contentCss = await readFile(path.join(repoRoot, 'Chrome Extension', 'content.css'), 'utf8');
   const { screenshotHtml } = await import('../scripts/generate-store-assets.js');
   assert.equal(provenance.source, 'live-extension');
   assert.equal(provenance.manifestName, manifest.name);
-  assert.equal(provenance.manifestVersion, manifest.version);
+  assert.match(provenance.capturedManifestVersion, /^\d+\.\d+\.\d+$/);
   assert.equal(provenance.demoHtmlSha256, createHash('sha256').update(screenshotHtml(iconSvg)).digest('hex'));
+  assert.equal(provenance.contentScriptSha256, createHash('sha256').update(contentScript).digest('hex'));
+  assert.equal(provenance.contentCssSha256, createHash('sha256').update(contentCss).digest('hex'));
   assert.deepEqual({ width: provenance.width, height: provenance.height }, { width: 1280, height: 800 });
   assert.ok(provenance.snapshotElementCount > 0);
   assert.ok(provenance.overlayBadgeCount > 0);

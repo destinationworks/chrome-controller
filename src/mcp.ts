@@ -142,7 +142,7 @@ async function main(): Promise<void> {
   const { CallToolRequestSchema, ListToolsRequestSchema } = await import('@modelcontextprotocol/sdk/types.js');
 
   const server = new Server(
-    { name: 'chrome-controller', version: '1.2.0' },
+    { name: 'chrome-controller', version: '1.2.1' },
     { capabilities: { tools: {} } }
   );
 

@@ -83,8 +83,13 @@ async function closeServer(server) {
 async function capture() {
   const discovery = await readDiscovery();
   await assertExtensionConnected(discovery);
-  const iconSvg = await fs.readFile(path.join(extensionDir, 'icon128.svg'), 'utf8');
-  const manifest = JSON.parse(await fs.readFile(path.join(extensionDir, 'manifest.json'), 'utf8'));
+  const [iconSvg, contentScript, contentCss, manifestJson] = await Promise.all([
+    fs.readFile(path.join(extensionDir, 'icon128.svg'), 'utf8'),
+    fs.readFile(path.join(extensionDir, 'content.js'), 'utf8'),
+    fs.readFile(path.join(extensionDir, 'content.css'), 'utf8'),
+    fs.readFile(path.join(extensionDir, 'manifest.json'), 'utf8'),
+  ]);
+  const manifest = JSON.parse(manifestJson);
   const demoHtml = screenshotHtml(iconSvg);
   const { server, url } = await startDemoServer(demoHtml, iconSvg);
   let tabId;
@@ -155,8 +160,10 @@ async function capture() {
     await fs.writeFile(provenancePath, `${JSON.stringify({
       source: 'live-extension',
       manifestName: manifest.name,
-      manifestVersion: manifest.version,
+      capturedManifestVersion: manifest.version,
       demoHtmlSha256: createHash('sha256').update(demoHtml).digest('hex'),
+      contentScriptSha256: createHash('sha256').update(contentScript).digest('hex'),
+      contentCssSha256: createHash('sha256').update(contentCss).digest('hex'),
       width: 1280,
       height: 800,
       snapshotElementCount: snapshot.count,

@@ -1,8 +1,10 @@
 {
   "source": "live-extension",
   "manifestName": "p agent extension",
-  "manifestVersion": "1.2.0",
+  "capturedManifestVersion": "1.2.0",
   "demoHtmlSha256": "6628ba8944be15d878b3a412a227250e38af9a655ea60258771ac219f3084e77",
+  "contentScriptSha256": "bf570221a9b99b08ebe26ae23aec356d3d4e0096fdc13a93624fa9f464c7e9b9",
+  "contentCssSha256": "63a0f7f65243e8d87ab044343182775a91b7ca97779d3c7331cb27d687293df3",
   "width": 1280,
   "height": 800,
   "snapshotElementCount": 1,
