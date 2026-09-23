@@ -5,7 +5,7 @@
  */
 
 import http from 'node:http';
-import net from 'node:net';
+import { describeIpcFailure, IpcError as TransportIpcError, sendIpcRequest, type IpcResponse } from './ipc-client.js';
 import { getSocketPath } from './native-host.js';
 import { probeHost, type ProbeResult, type HostState } from './watchdog.js';
 import {
@@ -120,112 +120,70 @@ export async function buildHealthReport(
 }
 
 /**
- * Why an IPC round-trip failed. Only `unavailable` means the request never
- * reached the host; every other kind means the host received it, so the
- * command may already have run in Chrome and must not be replayed elsewhere.
- * - `unavailable`: the connection could not be opened (ENOENT, ECONNREFUSED, ...).
- * - `timeout`: the host accepted the request and did not answer in time --
- *   either the host is wedged or it is still waiting on a slow Chrome.
- * - `protocol`: the connection closed, reset, or returned garbage before a
- *   complete answer.
- * - `rejected`: the host answered `{ success: false }`. Its message is the
- *   command's real result (e.g. Chrome refusing to script the Web Store).
+ * The host answered `{ success: false }`. This is not a transport failure: its
+ * message is the command's real result (e.g. Chrome refusing to script the
+ * Web Store), so it is surfaced verbatim and never replayed over the relay.
  */
-export type IpcFailureKind = 'unavailable' | 'timeout' | 'protocol' | 'rejected';
+export class HostRejectedError extends Error {
+  readonly kind = 'rejected';
 
-export class IpcError extends Error {
-  readonly kind: IpcFailureKind;
-
-  constructor(kind: IpcFailureKind, message: string) {
+  constructor(message: string) {
     super(message);
-    this.name = 'IpcError';
-    this.kind = kind;
+    this.name = 'HostRejectedError';
   }
 }
 
-function sendIpcCommand(action: string, params: Record<string, unknown> = {}, timeoutMs = 10000): Promise<unknown> {
-  const socketPath = getSocketPath();
-  return new Promise((resolve, reject) => {
-    let connected = false;
-    let settled = false;
-    const settle = (outcome: () => void) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      outcome();
-    };
-    const fail = (kind: IpcFailureKind, message: string) => settle(() => {
-      client.destroy();
-      reject(new IpcError(kind, message));
-    });
+/**
+ * What sendCommand rejects with on the IPC path: a transport failure
+ * (see ipc-client.ts for its kinds) or the host's own rejection.
+ */
+export type IpcError = TransportIpcError | HostRejectedError;
 
-    const client = net.connect(socketPath, () => {
-      connected = true;
-      client.write(JSON.stringify({ action, ...params }) + '\n');
-    });
-    // Decode as a stream: a multi-byte character split across two reads
-    // would otherwise be turned into replacement characters.
-    client.setEncoding('utf8');
-
-    const timer = setTimeout(() => fail('timeout', `did not answer within ${timeoutMs}ms`), timeoutMs);
-
-    let dataStr = '';
-    client.on('data', (chunk: string) => {
-      dataStr += chunk;
-      const newline = dataStr.indexOf('\n');
-      if (newline < 0) return;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(dataStr.slice(0, newline));
-      } catch {
-        fail('protocol', 'returned an unparseable response');
-        return;
-      }
-      // Validate before settling: a throw inside settle() would leave the
-      // promise pending forever (and `null.success` would crash the server).
-      if (typeof parsed !== 'object' || parsed === null || typeof (parsed as { success?: unknown }).success !== 'boolean') {
-        fail('protocol', 'returned a malformed response');
-        return;
-      }
-      const answer = parsed as { success: boolean; result?: unknown; error?: unknown };
-      settle(() => {
-        client.end();
-        if (answer.success) resolve(answer.result);
-        else reject(new IpcError('rejected', typeof answer.error === 'string' ? answer.error : 'IPC command failed'));
-      });
-    });
-
-    client.on('error', (err) => {
-      fail(connected ? 'protocol' : 'unavailable', connected ? `connection failed after the request was sent (${err.message})` : err.message);
-    });
-
-    // Without this, a host that exits mid-request leaves the client waiting
-    // out the full timeout and then blaming a wedge.
-    client.on('close', () => fail('protocol', 'closed the connection without answering'));
-  });
-}
+const RELAY_HINT = 'set CHROME_CONTROLLER_ALLOW_RELAY=1 or HTTP_PORT';
 
 /** Turns a raw IPC failure into the message an operator or agent acts on. */
-function describeIpcFailure(error: IpcError, socketPath: string, nativeOnly: boolean): IpcError {
-  const notRetried = 'The command may still have run in Chrome, so it was not retried.';
-  switch (error.kind) {
-    case 'unavailable':
-      return new IpcError('unavailable',
-        `NATIVE_IPC_UNAVAILABLE: Native Messaging IPC at ${socketPath} is unavailable (${error.message}). ` +
-        (nativeOnly
-          ? 'This action carries sensitive data and is never sent over the relay.'
-          : 'Zero-ports Native Messaging is the primary protocol. Fallback to network relay requires explicit activation (set CHROME_CONTROLLER_ALLOW_RELAY=1 or HTTP_PORT).'));
-    case 'timeout':
-      return new IpcError('timeout',
-        `NATIVE_IPC_TIMEOUT: Native host at ${socketPath} accepted the request but ${error.message}. ` +
-        `Either the host is wedged or it is still waiting on a slow Chrome. Run \`npm run watchdog\` to tell them apart: ` +
-        `it probes with hostPing, which the host answers locally without Chrome. ${notRetried}`);
-    case 'protocol':
-      return new IpcError('protocol',
-        `NATIVE_IPC_PROTOCOL_ERROR: Native host at ${socketPath} ${error.message}. ` +
-        `Run \`npm run watchdog\` to check whether the host is still alive. ${notRetried}`);
-    case 'rejected':
-      return error;
+function describeMcpIpcFailure(error: TransportIpcError, socketPath: string, nativeOnly: boolean): TransportIpcError {
+  // The relay hint would be wrong here: enabling the relay cannot help.
+  if (error.kind === 'unavailable' && nativeOnly) {
+    return new TransportIpcError('unavailable',
+      `NATIVE_IPC_UNAVAILABLE: Native Messaging IPC at ${socketPath} is unavailable (${error.message}). ` +
+      'This action carries sensitive data and is never sent over the relay.');
+  }
+  return describeIpcFailure(error, socketPath, RELAY_HINT);
+}
+
+/** Resolves the host's result, or rejects with its `success: false` answer. */
+function unwrapHostAnswer(answer: IpcResponse, socketPath: string): unknown {
+  if (typeof answer.success !== 'boolean') {
+    // The host was reached, so this is labelled like any other protocol error.
+    throw describeMcpIpcFailure(
+      new TransportIpcError('protocol', 'returned a malformed response without a boolean success'), socketPath, false);
+  }
+  if (!answer.success) throw new HostRejectedError(typeof answer.error === 'string' ? answer.error : 'IPC command failed');
+  return answer.result;
+}
+
+/**
+ * Sends one request over IPC. Resolves with the host's raw answer, or with
+ * `undefined` when the socket could not be reached and the relay may be used
+ * instead. Every other failure is thrown: the host may already have run the
+ * command, so replaying it over the relay could run it twice.
+ */
+async function tryIpc(
+  socketPath: string,
+  payload: Record<string, unknown>,
+  ipcTimeoutMs: number,
+  mayRelay: boolean,
+  nativeOnly: boolean,
+): Promise<IpcResponse | undefined> {
+  try {
+    return await sendIpcRequest(socketPath, payload, ipcTimeoutMs);
+  } catch (ipcErr) {
+    // An invalid timeout or unserializable payload is a caller bug, not a transport failure.
+    if (!(ipcErr instanceof TransportIpcError)) throw ipcErr;
+    if (ipcErr.kind !== 'unavailable' || !mayRelay) throw describeMcpIpcFailure(ipcErr, socketPath, nativeOnly);
+    console.error(`[chrome-controller-mcp] Native Messaging IPC unavailable (${ipcErr.message}), falling back to HTTP relay...`);
+    return undefined;
   }
 }
 
@@ -239,16 +197,8 @@ export async function sendCommand(
   const socketPath = getSocketPath();
 
   if (!process.env.HTTP_PORT || nativeOnly) {
-    try {
-      return await sendIpcCommand(action, params, ipcTimeoutMs);
-    } catch (ipcErr) {
-      const error = ipcErr as IpcError;
-      // Only a request that never reached the host may be replayed over the relay.
-      if (error.kind !== 'unavailable' || nativeOnly || !allowRelay) {
-        throw describeIpcFailure(error, socketPath, nativeOnly);
-      }
-      console.error(`[chrome-controller-mcp] Native Messaging IPC unavailable (${error.message}), falling back to HTTP relay...`);
-    }
+    const answer = await tryIpc(socketPath, { action, ...params }, ipcTimeoutMs, allowRelay && !nativeOnly, nativeOnly);
+    if (answer) return unwrapHostAnswer(answer, socketPath);
   }
 
   const { httpPort: HTTP_PORT, apiKey: API_KEY } = getConfig();
