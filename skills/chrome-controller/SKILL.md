@@ -74,7 +74,7 @@ Relay credentials are generated per server instance, saved in a `0600` discovery
 
 ## Workflow
 
-1. **Pre-flight:** Run `chrome_controller_health` to confirm connection over Native Messaging (do NOT run `npm start`). If health fails, notify the user before attempting fallback options.
+1. **Pre-flight:** Run `chrome_controller_health` to confirm connection over Native Messaging (do NOT run `npm start`). If health fails, notify the user before attempting fallback options. Only `NATIVE_IPC_UNAVAILABLE` means the host could not be reached. `NATIVE_IPC_TIMEOUT` or `NATIVE_IPC_PROTOCOL_ERROR` mean the host received the command and may have run it, so check the page before repeating a click, fill, or tab creation. Health with `mode: "NativeMessagingIPC"` and `success: false` means the host is up but refused a Chrome query; `error`, `extensionConnected`, `sensitiveExtractionInProgress`, and `browserOutputQuarantined` say why.
 2. **Find or create a tab:** `chrome_query_tabs` or `chrome_create_tab`.
 3. **Select a tab:** `chrome_select_tab` to mark an existing tab as controlled.
 4. Controlled tabs go into the **AI Tool** Chrome tab group and get a `🤖 ` title prefix.

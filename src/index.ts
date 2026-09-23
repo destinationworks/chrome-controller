@@ -4,13 +4,14 @@
  * Registers all chrome_* tools with the Pi agent runtime.
  * Tools communicate via Native Messaging IPC socket (~/.chrome-controller/run/chrome-controller.sock;
  * see getSocketPath() in native-host.ts for platform and env overrides)
- * with fallback to the local HTTP relay server (src/server.ts) on port 8898.
+ * with fallback to the local HTTP relay server (src/server.ts) on port 8898 only when the
+ * socket cannot be reached (see ipc-client.ts for how failures are classified).
  */
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import fs from 'node:fs';
-import net from 'node:net';
+import { assertValidIpcTimeout, describeIpcFailure, IpcError, sendIpcRequest, type IpcResponse } from './ipc-client.js';
 import { getSocketPath } from './native-host.js';
 import {
   normalizeInstanceName,
@@ -77,57 +78,54 @@ function textResult(value: unknown) {
   };
 }
 
-function sendIpcRequest(payload: Record<string, unknown>, timeoutMs = 10000): Promise<ChromeResponse> {
-  const socketPath = getSocketPath();
-  return new Promise((resolve, reject) => {
-    const client = net.connect(socketPath, () => {
-      client.write(JSON.stringify(payload) + '\n');
-    });
+const DEFAULT_IPC_TIMEOUT_MS = 10000;
 
-    let dataStr = '';
-    const timer = setTimeout(() => {
-      client.destroy();
-      reject(new Error('IPC socket request timeout'));
-    }, timeoutMs);
+export type ChromeControllerPiOptions = {
+  /** How long to wait for the native host to answer one IPC request. */
+  ipcTimeoutMs?: number;
+};
 
-    client.on('data', (chunk) => {
-      dataStr += chunk.toString('utf8');
-      if (dataStr.includes('\n')) {
-        clearTimeout(timer);
-        client.end();
-        try {
-          const parsed = JSON.parse(dataStr.trim()) as ChromeResponse;
-          resolve(parsed);
-        } catch {
-          reject(new Error('Invalid IPC JSON response'));
-        }
-      }
-    });
-
-    client.on('error', (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-  });
+/** CHROME_CONTROLLER_URL also enables the relay, but it skips IPC before this is consulted. */
+function relayAllowed(): boolean {
+  return process.env.CHROME_CONTROLLER_ALLOW_RELAY === '1' || Boolean(process.env.HTTP_PORT);
 }
 
-async function chromeRequest(payload: ChromeAction | Record<string, unknown>, signal?: AbortSignal): Promise<ChromeResponse> {
-  const allowRelay = process.env.CHROME_CONTROLLER_ALLOW_RELAY === '1' || Boolean(process.env.CHROME_CONTROLLER_URL) || Boolean(process.env.HTTP_PORT);
-  const socketPath = getSocketPath();
+const RELAY_HINT = 'set CHROME_CONTROLLER_ALLOW_RELAY=1 or CHROME_CONTROLLER_URL';
 
-  if (process.env.NODE_ENV !== 'test' && !process.env.CHROME_CONTROLLER_URL) {
-    try {
-      return await sendIpcRequest(payload as Record<string, unknown>);
-    } catch (ipcErr) {
-      if (!allowRelay) {
-        throw new Error(
-          `NATIVE_IPC_UNAVAILABLE: Native Messaging IPC at ${socketPath} is unavailable (${(ipcErr as Error).message}). ` +
-          `Zero-ports Native Messaging is the primary protocol. Fallback to network relay requires explicit activation (set CHROME_CONTROLLER_ALLOW_RELAY=1 or CHROME_CONTROLLER_URL).`
-        );
-      }
-      console.error(`[chrome-controller-pi] Native Messaging IPC failed (${(ipcErr as Error).message}), falling back to HTTP relay...`);
+/**
+ * Sends one request over IPC. Resolves with the host's answer, or with
+ * `undefined` when the socket could not be reached and the relay may be used
+ * instead. Every other failure is thrown: the host may already have run the
+ * command, so replaying it over the relay could run it twice.
+ */
+async function tryIpc(
+  payload: Record<string, unknown>,
+  ipcTimeoutMs: number,
+  signal: AbortSignal | undefined,
+): Promise<IpcResponse | undefined> {
+  if (process.env.CHROME_CONTROLLER_URL) return undefined;
+  const socketPath = getSocketPath();
+  try {
+    return await sendIpcRequest(socketPath, payload, ipcTimeoutMs, signal);
+  } catch (ipcErr) {
+    // An abort is the caller's decision, not a transport failure.
+    if (!(ipcErr instanceof IpcError)) throw ipcErr;
+    const error = ipcErr;
+    if (error.kind !== 'unavailable' || !relayAllowed()) {
+      throw describeIpcFailure(error, socketPath, RELAY_HINT);
     }
+    console.error(`[chrome-controller-pi] Native Messaging IPC unavailable (${error.message}), falling back to HTTP relay...`);
+    return undefined;
   }
+}
+
+async function chromeRequest(
+  payload: ChromeAction | Record<string, unknown>,
+  signal: AbortSignal | undefined,
+  ipcTimeoutMs: number,
+): Promise<ChromeResponse> {
+  const ipcResponse = await tryIpc(payload as Record<string, unknown>, ipcTimeoutMs, signal);
+  if (ipcResponse) return ipcResponse;
 
   const relay = relayConfig();
   const response = await fetch(relay.baseUrl, {
@@ -146,24 +144,41 @@ async function chromeRequest(payload: ChromeAction | Record<string, unknown>, si
   return data;
 }
 
-async function chromeHealth(signal?: AbortSignal): Promise<ChromeResponse> {
-  const allowRelay = process.env.CHROME_CONTROLLER_ALLOW_RELAY === '1' || Boolean(process.env.CHROME_CONTROLLER_URL) || Boolean(process.env.HTTP_PORT);
-  const socketPath = getSocketPath();
+/**
+ * Asks the host for its own state after it refused a Chrome query. The host
+ * answers hostPing locally, so this separates "extension not connected" from
+ * "host locked or quarantined". Returns nothing if the ping itself fails.
+ */
+async function hostState(ipcTimeoutMs: number, signal: AbortSignal | undefined): Promise<Record<string, unknown>> {
+  let pong: IpcResponse;
+  try {
+    pong = await sendIpcRequest(getSocketPath(), { action: 'hostPing' }, ipcTimeoutMs, signal);
+  } catch {
+    return {};
+  }
+  const result = pong.result as Record<string, unknown> | undefined;
+  if (!pong.success || !result || typeof result !== 'object') return {};
+  return {
+    extensionConnected: result.chromeConnected === true,
+    sensitiveExtractionInProgress: result.sensitiveExtractionInProgress === true,
+    browserOutputQuarantined: result.browserOutputQuarantined === true,
+  };
+}
 
-  if (process.env.NODE_ENV !== 'test' && !process.env.CHROME_CONTROLLER_URL) {
-    try {
-      const ipcRes = await sendIpcRequest({ action: 'queryTabs' });
-      if (ipcRes.success) {
-        return { success: true, extensionConnected: true, mode: 'NativeMessagingIPC' };
-      }
-    } catch (ipcErr) {
-      if (!allowRelay) {
-        throw new Error(
-          `NATIVE_IPC_UNAVAILABLE: Native Messaging IPC at ${socketPath} is unavailable (${(ipcErr as Error).message}). ` +
-          `Zero-ports Native Messaging is the primary protocol. Fallback to network relay requires explicit activation.`
-        );
-      }
+async function chromeHealth(signal: AbortSignal | undefined, ipcTimeoutMs: number): Promise<ChromeResponse> {
+  const ipcResponse = await tryIpc({ action: 'queryTabs' }, ipcTimeoutMs, signal);
+  if (ipcResponse) {
+    // The host answered, so IPC is the live transport; a refusal describes
+    // its Chrome side and says nothing about the relay.
+    if (ipcResponse.success) {
+      return { success: true, extensionConnected: true, mode: 'NativeMessagingIPC' };
     }
+    return {
+      success: false,
+      mode: 'NativeMessagingIPC',
+      error: ipcResponse.error ?? 'Native host answered queryTabs with success:false',
+      ...(await hostState(ipcTimeoutMs, signal)),
+    };
   }
 
   const relay = relayConfig();
@@ -186,7 +201,13 @@ function debuggerBatch(tabId: number, actions: ChromeAction[]) {
   };
 }
 
-export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
+export default function chromeControllerPiExtension(pi: ExtensionAPI, options: ChromeControllerPiOptions = {}): void {
+  const ipcTimeoutMs = options.ipcTimeoutMs ?? DEFAULT_IPC_TIMEOUT_MS;
+  assertValidIpcTimeout(ipcTimeoutMs);
+  const request = (payload: ChromeAction | Record<string, unknown>, signal?: AbortSignal) =>
+    chromeRequest(payload, signal, ipcTimeoutMs);
+  const health = (signal?: AbortSignal) => chromeHealth(signal, ipcTimeoutMs);
+
   // ── Health ──────────────────────────────────────────────────────────────────
   pi.registerTool({
     name: 'chrome_controller_health',
@@ -198,7 +219,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
     ],
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, signal) {
-      return textResult(await chromeHealth(signal));
+      return textResult(await health(signal));
     },
   });
 
@@ -220,7 +241,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
       ),
     }),
     async execute(_toolCallId, params, signal) {
-      const data = await chromeRequest({ action: 'queryTabs', queryInfo: params.queryInfo ?? {} }, signal);
+      const data = await request({ action: 'queryTabs', queryInfo: params.queryInfo ?? {} }, signal);
       if (params.mode !== 'full' && Array.isArray(data.result)) {
         data.result = (data.result as Record<string, unknown>[]).map((tab) => ({
           id: tab['id'],
@@ -246,7 +267,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
       active: Type.Optional(Type.Boolean({ description: 'Whether the new tab should become active. Defaults to true.' })),
     }),
     async execute(_toolCallId, params, signal) {
-      return textResult(await chromeRequest({ action: 'createTab', url: params.url, active: params.active }, signal));
+      return textResult(await request({ action: 'createTab', url: params.url, active: params.active }, signal));
     },
   });
 
@@ -264,7 +285,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
       activate: Type.Optional(Type.Boolean({ description: 'Whether Chrome should activate the tab. Defaults to true.' })),
     }),
     async execute(_toolCallId, params, signal) {
-      return textResult(await chromeRequest({ action: 'selectTab', tabId: params.tabId, activate: params.activate }, signal));
+      return textResult(await request({ action: 'selectTab', tabId: params.tabId, activate: params.activate }, signal));
     },
   });
 
@@ -280,7 +301,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
       reason: Type.Optional(Type.String({ description: 'Short reason shown in the page overlay action feed.' })),
     }),
     async execute(_toolCallId, params, signal) {
-      return textResult(await chromeRequest({ action: 'releaseTab', tabId: params.tabId, reason: params.reason }, signal));
+      return textResult(await request({ action: 'releaseTab', tabId: params.tabId, reason: params.reason }, signal));
     },
   });
 
@@ -297,7 +318,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
       closeTabs: Type.Optional(Type.Boolean({ description: 'When true, close all tabs in the AI Tool group. Defaults to false.' })),
     }),
     async execute(_toolCallId, params, signal) {
-      return textResult(await chromeRequest({ action: 'cleanupManagedTabs', closeTabs: params.closeTabs === true }, signal));
+      return textResult(await request({ action: 'cleanupManagedTabs', closeTabs: params.closeTabs === true }, signal));
     },
   });
 
@@ -314,7 +335,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
       elementId: Type.Optional(Type.Number({ description: 'Numerical element ID tag from chrome_snapshot_elements.' })),
     }),
     async execute(_toolCallId, params, signal) {
-      return textResult(await chromeRequest({ action: 'clickSelector', tabId: params.tabId, selector: params.selector, elementId: params.elementId }, signal));
+      return textResult(await request({ action: 'clickSelector', tabId: params.tabId, selector: params.selector, elementId: params.elementId }, signal));
     },
   });
 
@@ -332,7 +353,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
       text: Type.String({ description: 'Text content to fill into the input field.' }),
     }),
     async execute(_toolCallId, params, signal) {
-      return textResult(await chromeRequest({ action: 'fillSelector', tabId: params.tabId, selector: params.selector, elementId: params.elementId, text: params.text }, signal));
+      return textResult(await request({ action: 'fillSelector', tabId: params.tabId, selector: params.selector, elementId: params.elementId, text: params.text }, signal));
     },
   });
 
@@ -350,7 +371,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
       value: Type.String({ description: 'Option value to select.' }),
     }),
     async execute(_toolCallId, params, signal) {
-      return textResult(await chromeRequest({ action: 'selectOption', tabId: params.tabId, selector: params.selector, elementId: params.elementId, value: params.value }, signal));
+      return textResult(await request({ action: 'selectOption', tabId: params.tabId, selector: params.selector, elementId: params.elementId, value: params.value }, signal));
     },
   });
 
@@ -366,7 +387,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
       showOverlay: Type.Optional(Type.Boolean({ description: 'Whether to show visual badge overlays on screen. Defaults to true.' })),
     }),
     async execute(_toolCallId, params, signal) {
-      return textResult(await chromeRequest({ action: 'snapshotElements', tabId: params.tabId, showOverlay: params.showOverlay }, signal));
+      return textResult(await request({ action: 'snapshotElements', tabId: params.tabId, showOverlay: params.showOverlay }, signal));
     },
   });
 
@@ -381,7 +402,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
       tabId: Type.Number({ description: 'Chrome tab id.' }),
     }),
     async execute(_toolCallId, params, signal) {
-      return textResult(await chromeRequest({ action: 'getPageErrors', tabId: params.tabId }, signal));
+      return textResult(await request({ action: 'getPageErrors', tabId: params.tabId }, signal));
     },
   });
 
@@ -438,7 +459,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
         params.type === 'release' ? [release] :
         [move, press, release];
 
-      return textResult(await chromeRequest(debuggerBatch(params.tabId, actions), signal));
+      return textResult(await request(debuggerBatch(params.tabId, actions), signal));
     },
   });
 
@@ -458,7 +479,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, params, signal) {
       return textResult(
-        await chromeRequest(
+        await request(
           debuggerBatch(params.tabId, [
             {
               action: 'sendCommand',
@@ -492,7 +513,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, params, signal) {
       return textResult(
-        await chromeRequest(
+        await request(
           {
             mode: params.mode ?? 'parallel',
             stopOnError: params.stopOnError,
@@ -523,7 +544,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
       const screenshotOptions: Record<string, unknown> = { format };
       if (params.quality !== undefined) screenshotOptions['quality'] = params.quality;
 
-      const data = await chromeRequest(
+      const data = await request(
         { action: 'captureScreenshot', tabId: params.tabId, screenshotOptions },
         signal
       );
@@ -556,7 +577,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, params, signal) {
       return textResult(
-        await chromeRequest(
+        await request(
           {
             action: 'captureVideo',
             tabId: params.tabId,
@@ -586,7 +607,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
       untruncated: Type.Optional(Type.Boolean({ description: 'Return full result without truncation.' })),
     }),
     async execute(_toolCallId, params, signal) {
-      const data = await chromeRequest(
+      const data = await request(
         {
           action: 'evaluateOnPage',
           tabId: params.tabId,
@@ -628,7 +649,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
       untruncated: Type.Optional(Type.Boolean({ description: 'Return full result without truncation.' })),
     }),
     async execute(_toolCallId, params, signal) {
-      const data = await chromeRequest(
+      const data = await request(
         {
           action: 'evaluateOnPage',
           tabId: params.tabId,
@@ -732,7 +753,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
       const maxResults = params.maxResults ?? 50;
       const maxTextLen = params.untruncated ? 5000 : 500;
 
-      const data = await chromeRequest(
+      const data = await request(
         {
           action: 'evaluateOnPage',
           tabId: params.tabId,
@@ -786,7 +807,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, params, signal) {
       return textResult(
-        await chromeRequest(
+        await request(
           {
             action: 'getConsoleLogs',
             tabId: params.tabId,

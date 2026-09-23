@@ -208,6 +208,25 @@ If you use Pi, Chrome Controller is a native extension:
 pi -e /path/to/chrome-controller/src/index.ts
 ```
 
+The Pi tools talk to the native host over the IPC socket first. Their errors say which side failed,
+and only an unreachable socket may fall back to the HTTP relay (when `CHROME_CONTROLLER_ALLOW_RELAY=1`,
+`CHROME_CONTROLLER_URL`, or `HTTP_PORT` is set; `CHROME_CONTROLLER_URL` skips IPC entirely):
+
+- `NATIVE_IPC_UNAVAILABLE`: the socket could not be opened (no host, or a stale socket). The request
+  never reached the host. With relay permission the request goes to the relay instead.
+- `NATIVE_IPC_TIMEOUT`: the host accepted the request but did not answer in time (10 s). It is either
+  wedged or still waiting on a slow Chrome; `npm run watchdog` tells them apart.
+- `NATIVE_IPC_PROTOCOL_ERROR`: the host closed or broke the connection, or sent an unreadable answer.
+- A host answer with `success: false` is returned to the agent unchanged. The host is healthy; the
+  command itself failed.
+
+Timeouts and protocol errors are never replayed over the relay, because the host may already have
+clicked, filled, or opened a tab. An aborted tool call is never sent to the relay either.
+`chrome_controller_health` follows the same rule: when the host answers but refuses the `queryTabs`
+probe, it reports `{ "success": false, "mode": "NativeMessagingIPC", "error": "..." }` instead of
+consulting the relay, plus the host's own view from `hostPing` when available: `extensionConnected`,
+`sensitiveExtractionInProgress`, and `browserOutputQuarantined`.
+
 ---
 
 ## Operational Modes

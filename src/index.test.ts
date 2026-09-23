@@ -14,6 +14,10 @@ import chromeControllerPiExtension from './index.ts';
 const TEST_API_KEY = 'test-key-0123456789abcdef01234567';
 const originalRelayUrl = process.env.CHROME_CONTROLLER_URL;
 const originalRelayKey = process.env.CHROME_CONTROLLER_API_KEY;
+const originalSocket = process.env.CHROME_CONTROLLER_SOCKET;
+// These tests drive the relay. Point IPC at a path that cannot exist so a test
+// that clears CHROME_CONTROLLER_URL can never reach a real native host.
+process.env.CHROME_CONTROLLER_SOCKET = `/nonexistent/chrome-controller-index-test-${process.pid}.sock`;
 process.env.CHROME_CONTROLLER_URL = 'http://127.0.0.1:8898';
 process.env.CHROME_CONTROLLER_API_KEY = TEST_API_KEY;
 
@@ -22,6 +26,8 @@ test.after(() => {
   else process.env.CHROME_CONTROLLER_URL = originalRelayUrl;
   if (originalRelayKey === undefined) delete process.env.CHROME_CONTROLLER_API_KEY;
   else process.env.CHROME_CONTROLLER_API_KEY = originalRelayKey;
+  if (originalSocket === undefined) delete process.env.CHROME_CONTROLLER_SOCKET;
+  else process.env.CHROME_CONTROLLER_SOCKET = originalSocket;
 });
 
 // Minimal mock Pi runtime
