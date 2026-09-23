@@ -11,6 +11,7 @@ import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import {
   getSocketPath,
   ensureSocketDir,
@@ -896,14 +897,18 @@ test('a second host must not clobber the live host PID file', async () => {
 
   // Spawn the incumbent as a separate process so the PIDs genuinely differ;
   // an in-process second host would write the identical value and prove nothing.
-  const script = path.join(tmpBase, 'incumbent.js');
+  // Load the host from source via the same tsx loader this test runs under.
+  // Requiring dist/ would make the test depend on a prior build, which CI does
+  // not have: it runs `npm test` before `npm run build`.
+  const hostModule = pathToFileURL(path.resolve('src/native-host.ts')).href;
+  const script = path.join(tmpBase, 'incumbent.mjs');
   fs.writeFileSync(script, `
-    const { NativeMessagingHost } = require(${JSON.stringify(path.resolve('dist/native-host.js'))});
+    import { NativeMessagingHost } from ${JSON.stringify(hostModule)};
     const host = new NativeMessagingHost(${JSON.stringify(testSocket)});
     host.ready.then(() => console.log('up')).catch((e) => { console.error(e.message); process.exit(1); });
     setInterval(() => {}, 1000);
   `);
-  const incumbent = spawn(process.execPath, [script]);
+  const incumbent = spawn(process.execPath, ['--import', 'tsx', script]);
   try {
     await new Promise<void>((resolve, reject) => {
       incumbent.stdout.on('data', (d: Buffer) => { if (d.toString().includes('up')) resolve(); });
