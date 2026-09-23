@@ -214,7 +214,11 @@ pi -e /path/to/chrome-controller/src/index.ts
 
 ### Mode 1: Native Messaging (Primary — Zero Open Ports)
 - **Security**: Chrome spawns `scripts/native-host-launcher.sh` directly via standard I/O (`stdio`).
-- Communication with agent processes occurs over the user-isolated Unix socket `/tmp/chrome-controller.sock`.
+- If Chrome Controller commands hang rather than fail, the native host may be wedged: the process is
+  alive and its socket still accepts connections, but it answers nothing, and SIGTERM will not stop it.
+  Run `npm run watchdog` to identify the state and `npm run watchdog -- --recover` to clear it, then
+  toggle the extension off and on at `chrome://extensions` to make Chrome spawn a fresh host.
+- Communication with agent processes occurs over the user-isolated Unix socket `~/.chrome-controller/run/chrome-controller.sock` (or `$XDG_RUNTIME_DIR/chrome-controller/run.sock` when that variable is set), in a directory created with mode `0700` and verified to be owned by the current user.
 - No listening TCP ports are opened, preventing any local network sniffing or unauthorized local access.
 
 ### Mode 2: Standalone Relay Server (HTTP/WebSocket Fallback)

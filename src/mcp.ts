@@ -7,6 +7,7 @@
 import http from 'node:http';
 import net from 'node:net';
 import { getSocketPath } from './native-host.js';
+import { probeHost, type ProbeResult, type HostState } from './watchdog.js';
 import {
   normalizeInstanceName,
   readDiscovery,
@@ -16,6 +17,22 @@ import {
 export { readDiscovery } from './discovery.js';
 
 const DEFAULT_HTTP_PORT = 8898;
+
+export const HOST_STATE_REMEDIATION: Record<Exclude<HostState, 'alive'> | 'extensionSilent', string> = {
+  wedged:
+    'The native host process is alive but its event loop is stuck, so it accepts connections and answers nothing. ' +
+    'Run `npm run watchdog -- --recover` to clear it (SIGTERM is swallowed in this state and SIGKILL is required), ' +
+    'then re-enable the extension at chrome://extensions to make Chrome spawn a fresh host.',
+  'stale-socket':
+    'A dead host left its socket file behind. The next host start removes it automatically; ' +
+    're-enable the extension at chrome://extensions to spawn one.',
+  down:
+    'No native host is running. Re-enable the extension at chrome://extensions so Chrome spawns it, ' +
+    'and confirm the host manifest is registered with `npm run install-host <EXTENSION_ID>`.',
+  extensionSilent:
+    'The extension service worker is not responding. Toggle the extension off and on at chrome://extensions ' +
+    '(Web Store installs have no Reload button, but the enable toggle restarts the service worker).',
+};
 export const SOCKET_PATH = getSocketPath();
 
 function relayPort(value: string | undefined, fallback: number): number {
@@ -42,6 +59,64 @@ export function getConfig(): { httpPort: number; apiKey: string } {
   }
   if (discovery) return { httpPort: discovery.httpPort, apiKey: discovery.apiKey };
   throw new Error('RELAY_CONFIG_UNAVAILABLE: no private Chrome Controller discovery file or explicit API_KEY is available');
+}
+
+export const HEALTH_PROBE_TIMEOUT_MS = 3000;
+/** The host's wait for Chrome. Must stay strictly below the IPC client timeout
+ *  so the host's definitive "Chrome did not answer" wins the race, instead of
+ *  the client's ambiguous "IPC timeout". */
+export const HEALTH_CHROME_WAIT_MS = 8000;
+export const HEALTH_IPC_CLIENT_TIMEOUT_MS = 12000;
+
+/**
+ * Builds the health report. A wedged host keeps its socket bound and answers
+ * nothing, so the host is probed first and Chrome is only consulted once the
+ * host is known to be responsive -- otherwise this tool hangs and still cannot
+ * say which side failed.
+ */
+export async function buildHealthReport(
+  probe: () => Promise<ProbeResult>,
+  queryTabs: () => Promise<unknown>,
+): Promise<Record<string, unknown>> {
+  let host: ProbeResult;
+  try {
+    host = await probe();
+  } catch (error) {
+    return {
+      success: false,
+      hostState: 'unknown',
+      extensionConnected: false,
+      detail: `Could not probe the native host: ${(error as Error).message}`,
+      remediation: HOST_STATE_REMEDIATION.down,
+    };
+  }
+
+  if (host.state !== 'alive') {
+    return {
+      success: false,
+      hostState: host.state,
+      extensionConnected: false,
+      detail: host.detail,
+      remediation: HOST_STATE_REMEDIATION[host.state],
+    };
+  }
+
+  try {
+    return {
+      success: true,
+      hostState: 'alive',
+      extensionConnected: true,
+      result: await queryTabs(),
+    };
+  } catch (error) {
+    return {
+      success: false,
+      hostState: 'alive',
+      extensionConnected: false,
+      detail: `Native host is healthy but Chrome did not answer: ${(error as Error).message}`,
+      remediation: HOST_STATE_REMEDIATION.extensionSilent,
+    };
+  }
 }
 
 function sendIpcCommand(action: string, params: Record<string, unknown> = {}, timeoutMs = 10000): Promise<unknown> {
@@ -79,14 +154,18 @@ function sendIpcCommand(action: string, params: Record<string, unknown> = {}, ti
   });
 }
 
-export async function sendCommand(action: string, params: Record<string, unknown> = {}): Promise<unknown> {
+export async function sendCommand(
+  action: string,
+  params: Record<string, unknown> = {},
+  ipcTimeoutMs = 10000,
+): Promise<unknown> {
   const allowRelay = process.env.CHROME_CONTROLLER_ALLOW_RELAY === '1' || Boolean(process.env.HTTP_PORT);
   const nativeOnly = action === 'extractSecretGuarded' || action === 'injectSecretGuarded' || params.sensitive === true;
   const socketPath = getSocketPath();
 
   if (!process.env.HTTP_PORT || nativeOnly) {
     try {
-      return await sendIpcCommand(action, params);
+      return await sendIpcCommand(action, params, ipcTimeoutMs);
     } catch (ipcErr) {
       if (nativeOnly || !allowRelay) {
         throw new Error(
@@ -410,8 +489,11 @@ async function main(): Promise<void> {
 
     try {
       if (toolName === 'chrome_controller_health') {
-        const result = await sendCommand('queryTabs', {});
-        return { content: [{ type: 'text', text: JSON.stringify({ success: true, extensionConnected: true, result }, null, 2) }] };
+        const report = await buildHealthReport(
+          () => probeHost(getSocketPath(), HEALTH_PROBE_TIMEOUT_MS),
+          () => sendCommand('queryTabs', { timeoutMs: HEALTH_CHROME_WAIT_MS }, HEALTH_IPC_CLIENT_TIMEOUT_MS),
+        );
+        return { content: [{ type: 'text', text: JSON.stringify(report, null, 2) }] };
       }
 
       if (toolName === 'chrome_query_tabs') {

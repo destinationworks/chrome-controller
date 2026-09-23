@@ -10,11 +10,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
+import { spawn } from 'node:child_process';
 import {
   getSocketPath,
   ensureSocketDir,
   cleanupStaleSocket,
   NativeMessagingHost,
+  pidFilePathForSocket,
+  readHostPid,
 } from './native-host.js';
 import { removeDiscovery, writeDiscovery } from './discovery.js';
 
@@ -688,27 +691,42 @@ test('NativeMessagingHost IPC server rejects oversized lines exceeding 10MB', as
   try {
     const client = net.connect(testSocket);
     try {
-      const closedPromise = new Promise<void>((resolve) => {
+      const terminated = new Promise<void>((resolve) => {
         client.on('close', () => resolve());
         client.on('error', () => resolve());
       });
-
-      // Write > 10MB of data without newline once connected
-      const largeChunk = Buffer.alloc(1024 * 1024, 'a');
-      client.on('connect', () => {
-        for (let i = 0; i < 11; i++) {
-          client.write(largeChunk);
-        }
+      await new Promise<void>((resolve, reject) => {
+        client.once('connect', () => resolve());
+        client.once('error', reject);
       });
+
+      // Feed 1MB at a time, respecting backpressure, and stop the moment the
+      // host tears the connection down. Queueing all 11MB up front left the
+      // client waiting on an unflushable write buffer for an unbounded time,
+      // which made this test flaky rather than testing the host's cap.
+      const chunk = Buffer.alloc(1024 * 1024, 'a');
+      let destroyed = false;
+      client.once('close', () => { destroyed = true; });
+      client.once('error', () => { destroyed = true; });
+
+      for (let i = 0; i < 11 && !destroyed; i++) {
+        if (!client.write(chunk)) {
+          await Promise.race([
+            new Promise<void>((resolve) => client.once('drain', () => resolve())),
+            terminated,
+          ]);
+        }
+      }
 
       let timeoutId: NodeJS.Timeout | undefined;
       await Promise.race([
-        closedPromise,
+        terminated,
         new Promise((_, reject) => {
           timeoutId = setTimeout(() => reject(new Error('Timeout waiting for socket termination')), 10000);
         }),
       ]);
       if (timeoutId) clearTimeout(timeoutId);
+      assert.ok(destroyed, 'host must destroy the connection for an over-cap line');
     } finally {
       client.destroy();
     }
@@ -803,3 +821,346 @@ function readDiscoveryStartedAt(instance: string): string {
   const raw = fs.readFileSync(path.join(os.homedir(), '.chrome-controller', `${instance}.json`), 'utf8');
   return (JSON.parse(raw) as { startedAt: string }).startedAt;
 }
+
+test('hostPing is answered locally and never forwarded to Chrome', async () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'nmh-hostping-test-'));
+  const testSocket = path.join(tmpBase, 'run.sock');
+  const host = new NativeMessagingHost(testSocket);
+  await host.ready;
+
+  // Spy on the one path that reaches the browser. Stubbing process.stdout is
+  // unreliable here: the test runner writes its own Buffer chunks to stdout.
+  const forwarded: unknown[] = [];
+  const originalSend = host.sendToChrome.bind(host);
+  host.sendToChrome = (payload) => { forwarded.push(payload); originalSend(payload); };
+
+  try {
+    const response = await ipcRequest(testSocket, { id: 7, action: 'hostPing' });
+    assert.strictEqual(response.success, true);
+    const result = response.result as Record<string, unknown>;
+    assert.strictEqual(result.pong, true);
+    assert.strictEqual(result.pid, process.pid);
+    assert.strictEqual(result.pendingRequests, 0);
+    // The wedge is only detectable if the probe never depends on the browser.
+    assert.deepStrictEqual(forwarded, [], 'hostPing must not forward anything to Chrome');
+  } finally {
+    host.sendToChrome = originalSend;
+    host.close();
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('hostPing still answers while browser output is quarantined', async () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'nmh-hostping-quarantine-test-'));
+  const testSocket = path.join(tmpBase, 'run.sock');
+  const host = new NativeMessagingHost(testSocket);
+  await host.ready;
+  (host as unknown as { browserOutputQuarantined: boolean }).browserOutputQuarantined = true;
+
+  try {
+    const ping = await ipcRequest(testSocket, { id: 1, action: 'hostPing' });
+    assert.strictEqual(ping.success, true);
+    assert.strictEqual((ping.result as Record<string, unknown>).browserOutputQuarantined, true);
+
+    // A quarantined host must still refuse real browser work.
+    const blocked = await ipcRequest(testSocket, { id: 2, action: 'queryTabs' });
+    assert.strictEqual(blocked.success, false);
+    assert.match(String(blocked.error), /quarantined/);
+  } finally {
+    host.close();
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('a PID file write failure rolls back the listener and the socket', async () => {
+  if (process.platform === 'win32') return;
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'nmh-pid-rollback-'));
+  const testSocket = path.join(tmpBase, 'run.sock');
+
+  // A directory at the PID path makes writeFileSync fail with EISDIR after the
+  // listener is already bound -- the rollback branch, which nothing else hits.
+  fs.mkdirSync(pidFilePathForSocket(testSocket));
+
+  const host = new NativeMessagingHost(testSocket);
+  await assert.rejects(host.ready, /PID file write failed/);
+  assert.strictEqual(fs.existsSync(testSocket), false, 'rollback must remove the bound socket');
+
+  host.close();
+  fs.rmSync(tmpBase, { recursive: true, force: true });
+});
+
+test('a second host must not clobber the live host PID file', async () => {
+  if (process.platform === 'win32') return;
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'nmh-pid-conflict-test-'));
+  const testSocket = path.join(tmpBase, 'run.sock');
+
+  // Spawn the incumbent as a separate process so the PIDs genuinely differ;
+  // an in-process second host would write the identical value and prove nothing.
+  const script = path.join(tmpBase, 'incumbent.js');
+  fs.writeFileSync(script, `
+    const { NativeMessagingHost } = require(${JSON.stringify(path.resolve('dist/native-host.js'))});
+    const host = new NativeMessagingHost(${JSON.stringify(testSocket)});
+    host.ready.then(() => console.log('up')).catch((e) => { console.error(e.message); process.exit(1); });
+    setInterval(() => {}, 1000);
+  `);
+  const incumbent = spawn(process.execPath, [script]);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      incumbent.stdout.on('data', (d: Buffer) => { if (d.toString().includes('up')) resolve(); });
+      // The host logs "IPC listening on ..." to stderr on success, so only a
+      // non-zero exit counts as failure here.
+      incumbent.once('exit', (code) => reject(new Error(`incumbent exited early with code ${code}`)));
+      incumbent.once('error', reject);
+    });
+    assert.strictEqual(readHostPid(testSocket), incumbent.pid);
+
+    const loser = new NativeMessagingHost(testSocket);
+    await assert.rejects(loser.ready, /already active/);
+    loser.close();
+
+    assert.strictEqual(readHostPid(testSocket), incumbent.pid, 'the live host PID must survive');
+    assert.notStrictEqual(incumbent.pid, process.pid);
+  } finally {
+    incumbent.kill('SIGKILL');
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('IPC flood must not stall concurrent requests (event-loop wedge regression)', async () => {
+  if (process.platform === 'win32') return;
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'nmh-flood-latency-'));
+  const testSocket = path.join(tmpBase, 'run.sock');
+  const host = new NativeMessagingHost(testSocket);
+  await host.ready;
+
+  const flooder = net.connect(testSocket);
+  let floodDone = false;
+  const latencies: number[] = [];
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      flooder.once('connect', () => resolve());
+      flooder.once('error', reject);
+    });
+    flooder.on('error', () => { floodDone = true; });
+    flooder.on('close', () => { floodDone = true; });
+
+    // Feed just under the 10MB cap with no newline, in kernel-sized pieces.
+    // Concatenating per chunk copied ~6.4GB here and blocked the loop, so a
+    // concurrent client saw multi-second latency on a request that touches
+    // nothing. hostPing is answered locally, so any delay is pure loop stall.
+    const piece = Buffer.alloc(8192, 'a');
+    const pieces = Math.floor((9 * 1024 * 1024) / piece.length);
+
+    const floodStartedAt = Date.now();
+    let floodElapsed = 0;
+    const flood = (async () => {
+      for (let i = 0; i < pieces && !floodDone; i++) {
+        if (!flooder.write(piece)) {
+          await new Promise<void>((resolve) => flooder.once('drain', () => resolve()));
+        }
+      }
+      floodElapsed = Date.now() - floodStartedAt;
+      floodDone = true;
+    })();
+
+    while (!floodDone) {
+      const startedAt = Date.now();
+      const response = await ipcRequest(testSocket, { id: 1, action: 'hostPing' });
+      latencies.push(Date.now() - startedAt);
+      assert.strictEqual(response.success, true);
+    }
+    await flood;
+
+    assert.ok(latencies.length > 0, 'expected at least one probe during the flood');
+    // Per-request latency alone does not catch this: each individual copy is
+    // only milliseconds. The regression is cumulative, so assert the whole
+    // flood clears promptly. Concatenating per chunk copies ~6.4GB here and
+    // takes 7-8s; the chunk-list reader takes well under a second.
+    assert.ok(
+      floodElapsed < 3000,
+      `absorbing ${pieces * piece.length} bytes took ${floodElapsed}ms; the read path is copying the accumulated buffer per chunk`,
+    );
+    const worst = Math.max(...latencies);
+    assert.ok(worst < 1000, `hostPing stalled ${worst}ms during an IPC flood; the read path is blocking the event loop`);
+  } finally {
+    flooder.destroy();
+    host.close();
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('IPC reader accepts a line exactly at the cap and rejects one byte more', async () => {
+  if (process.platform === 'win32') return;
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'nmh-cap-boundary-'));
+  const testSocket = path.join(tmpBase, 'run.sock');
+  const host = new NativeMessagingHost(testSocket);
+  await host.ready;
+  const MAX = 10 * 1024 * 1024;
+
+  try {
+    // A line exactly at the cap must still be parsed, not dropped. It is
+    // invalid JSON, so the host answers with its parse error rather than
+    // destroying the connection.
+    const filler = 'x'.repeat(MAX - 2);
+    const atCap = Buffer.from(`"${filler}"`, 'utf8');
+    assert.strictEqual(atCap.length, MAX);
+
+    const client = net.connect(testSocket);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        client.once('connect', () => resolve());
+        client.once('error', reject);
+      });
+      const replied = new Promise<string>((resolve) => {
+        let buf = '';
+        client.on('data', (d) => { buf += d.toString('utf8'); if (buf.includes('\n')) resolve(buf.slice(0, buf.indexOf('\n'))); });
+      });
+      client.write(atCap);
+      client.write('\n');
+      const response = JSON.parse(await replied) as Record<string, unknown>;
+      assert.strictEqual(response.success, false, 'an at-cap line must reach the parser');
+    } finally {
+      client.destroy();
+    }
+
+    // One byte over the cap must destroy the connection instead.
+    const over = net.connect(testSocket);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        over.once('connect', () => resolve());
+        over.once('error', reject);
+      });
+      const terminated = new Promise<void>((resolve) => {
+        over.once('close', () => resolve());
+        over.once('error', () => resolve());
+      });
+      const piece = Buffer.alloc(64 * 1024, 'a');
+      let sent = 0;
+      let dead = false;
+      over.once('close', () => { dead = true; });
+      over.once('error', () => { dead = true; });
+      while (sent <= MAX && !dead) {
+        if (!over.write(piece)) {
+          await Promise.race([new Promise<void>((r) => over.once('drain', () => r())), terminated]);
+        }
+        sent += piece.length;
+      }
+      await terminated;
+      assert.ok(dead, 'an over-cap line must destroy the connection');
+    } finally {
+      over.destroy();
+    }
+  } finally {
+    host.close();
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('hostPing answers during guarded extraction without disturbing it', async () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'nmh-hostping-sensitive-'));
+  const testSocket = path.join(tmpBase, 'run.sock');
+  const host = new NativeMessagingHost(testSocket);
+  await host.ready;
+  const internals = host as unknown as {
+    sensitiveExtractionInProgress: boolean;
+    pendingRequests: Map<number, unknown>;
+  };
+
+  try {
+    internals.sensitiveExtractionInProgress = true;
+
+    const ping = await ipcRequest(testSocket, { id: 1, action: 'hostPing' });
+    assert.strictEqual(ping.success, true);
+    assert.strictEqual((ping.result as Record<string, unknown>).sensitiveExtractionInProgress, true);
+
+    // Real browser work must still be locked out while a secret is in flight.
+    const blocked = await ipcRequest(testSocket, { id: 2, action: 'queryTabs' });
+    assert.strictEqual(blocked.success, false);
+    assert.match(String(blocked.error), /locked during guarded extraction/);
+
+    // extractSecretGuarded refuses to start while pendingRequests is non-empty,
+    // so a polling watchdog must never leave entries behind.
+    await Promise.all(
+      Array.from({ length: 50 }, (_, i) => ipcRequest(testSocket, { id: i, action: 'hostPing' })),
+    );
+    assert.strictEqual(internals.pendingRequests.size, 0, 'hostPing must not touch pendingRequests');
+  } finally {
+    internals.sensitiveExtractionInProgress = false;
+    host.close();
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('livenessSnapshot exposes only non-sensitive scalar fields', async () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'nmh-snapshot-shape-'));
+  const testSocket = path.join(tmpBase, 'run.sock');
+  const host = new NativeMessagingHost(testSocket);
+  await host.ready;
+  try {
+    // The snapshot is written to the client without sanitizeSensitiveOutput,
+    // so its shape is pinned: a future field cannot slip past the sanitizer.
+    const snapshot = host.livenessSnapshot();
+    assert.deepStrictEqual(Object.keys(snapshot).sort(), [
+      'browserOutputQuarantined',
+      'chromeConnected',
+      'lastChromeMessageAt',
+      'pendingRequests',
+      'pid',
+      'pong',
+      'sensitiveExtractionInProgress',
+      'startedAt',
+      'uptimeMs',
+    ]);
+    for (const [key, value] of Object.entries(snapshot)) {
+      assert.ok(
+        value === null || ['boolean', 'number'].includes(typeof value),
+        `${key} must be a scalar, got ${typeof value}`,
+      );
+    }
+  } finally {
+    host.close();
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('PID file is private even when a world-readable file is already there', async () => {
+  if (process.platform === 'win32') return;
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'nmh-pid-mode-'));
+  const testSocket = path.join(tmpBase, 'run.sock');
+  const pidPath = pidFilePathForSocket(testSocket);
+  // writeFileSync's mode is ignored for an existing file, so a leftover from a
+  // previous umask would silently stay world-readable.
+  fs.writeFileSync(pidPath, '1\n', { mode: 0o644 });
+  fs.chmodSync(pidPath, 0o644);
+
+  const host = new NativeMessagingHost(testSocket);
+  await host.ready;
+  try {
+    assert.strictEqual(fs.statSync(pidPath).mode & 0o777, 0o600);
+    assert.strictEqual(readHostPid(testSocket), process.pid);
+  } finally {
+    host.close();
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('PID file write does not follow a symlink planted at its path', async () => {
+  if (process.platform === 'win32') return;
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'nmh-pid-symlink-'));
+  const testSocket = path.join(tmpBase, 'run.sock');
+  const target = path.join(tmpBase, 'victim.txt');
+  fs.writeFileSync(target, 'untouched\n');
+  fs.symlinkSync(target, pidFilePathForSocket(testSocket));
+
+  const host = new NativeMessagingHost(testSocket);
+  await host.ready;
+  try {
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'untouched\n', 'symlink target must not be written through');
+    assert.strictEqual(fs.lstatSync(pidFilePathForSocket(testSocket)).isSymbolicLink(), false);
+    assert.strictEqual(readHostPid(testSocket), process.pid);
+  } finally {
+    host.close();
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});

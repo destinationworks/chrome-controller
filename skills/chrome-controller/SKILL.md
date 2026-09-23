@@ -19,7 +19,10 @@ Use this skill when the user asks you to control Chrome, inspect browser tabs, c
 ## Required Components
 
 1. **Chrome Extension** — load `Chrome Extension/` as an unpacked MV3 extension in Chrome.
-2. **Native Messaging Host (Primary — Zero Ports)** — register host via `npm run install-host <EXTENSION_ID>`. Chrome and MCP connect automatically over stdio / Unix IPC (`/tmp/chrome-controller.sock`) with zero open network ports.
+0. **Hanging tools?** Run `npm run watchdog`. A wedged host keeps its socket bound and answers
+   nothing, so commands hang instead of failing; `npm run watchdog -- --recover` clears it, then
+   re-enable the extension at `chrome://extensions`.
+2. **Native Messaging Host (Primary — Zero Ports)** — register host via `npm run install-host <EXTENSION_ID>`. Chrome and MCP connect automatically over stdio / Unix IPC (`~/.chrome-controller/run/chrome-controller.sock`, or `$XDG_RUNTIME_DIR/chrome-controller/run.sock` when set) with zero open network ports.
 3. **Pi/Antigravity Extension / MCP** — registered via `settings.json` or `mcpServers`.
 4. **Standalone Relay Server (Fallback Only)** — `npm start` (opens HTTP/WS ports). **STRICTLY RESTRICTED**: Ports may ONLY be used when Native Messaging fails, and requires explicit user notification.
 

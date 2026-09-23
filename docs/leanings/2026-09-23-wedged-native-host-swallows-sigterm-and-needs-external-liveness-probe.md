@@ -1,0 +1,42 @@
+# 2026-09-23 — A wedged native host swallows SIGTERM and cannot be detected by any Chrome-forwarded health check
+
+- **Status:** Resolved
+- **Task/context:** An agent reported "Chrome Controller's native messaging host died" and browser tools hung. Investigation of the live host on macOS, followed by fixes in `src/native-host.ts`, a new `src/watchdog.ts`, and a wedge-aware `chrome_controller_health` in `src/mcp.ts`.
+- **Unexpected observation or failure:** The host was not dead. The process was alive and still parented by Chrome, the IPC socket existed and accepted connections, but every command timed out. `kill <pid>` (SIGTERM) returned success and the process kept running; it had been in this state for over 14 hours.
+- **Evidence:**
+  - `ps -o pid,ppid,stat,lstart -p <pid>` — state `S`, parent = Google Chrome, started the previous day, unchanged across repeated SIGTERM.
+  - A manual `hostPing`-shaped IPC request over the socket produced `TIMEOUT`, while a connect alone succeeded — the listener was bound, the loop was not turning.
+  - After `kill -9`, a connect probe to the leftover socket file returned `ECONNREFUSED`, confirming the file outlived the listener.
+- **Approaches tried:**
+  - **Attempt:** `kill <pid>` (SIGTERM), as the "restart the host" remedy.
+    - **Outcome:** Did not work
+    - **Why:** `process.on('SIGTERM', ...)` replaces the default terminate action. The JS handler only runs when the event loop turns, so a wedged loop swallows the signal entirely and the process becomes signal-proof.
+  - **Attempt:** Diagnose with the existing `chrome_controller_health` MCP tool.
+    - **Outcome:** Did not work
+    - **Why:** Every IPC action, health included, was forwarded to Chrome via `requestFromChrome`. Against a wedged host the tool hangs for its full timeout and cannot distinguish "host wedged", "extension service worker dead", and "Chrome merely slow".
+  - **Attempt:** `kill -9 <pid>`.
+    - **Outcome:** Worked
+    - **Why:** SIGKILL is not deliverable to a JS handler and does not need the event loop.
+  - **Attempt:** Add a `process.exit()` backstop inside the signal handler to make TERM reliable.
+    - **Outcome:** Partial
+    - **Why:** It fixes the case where cleanup throws before `process.exit(0)` is reached, but it cannot rescue a wedged loop — the handler never runs at all in that state. Only an external escalation to SIGKILL recovers it.
+  - **Attempt:** Classify any non-`pong` answer from the socket as `wedged`.
+    - **Outcome:** Did not work
+    - **Why:** Running the finished watchdog against the live system caught it: a host from the previous build answered `Unknown action: hostPing` and was reported `wedged`, which would have sent an operator to SIGKILL a perfectly healthy process. A parseable response — error included — proves the event loop is turning. Only silence or unparseable output means wedged.
+  - **Attempt:** Have `--recover` signal whatever PID the PID file contains.
+    - **Outcome:** Did not work
+    - **Why:** Flagged in adversarial review. PID files survive SIGKILL and the OS recycles PIDs, so `--recover` could SIGKILL an unrelated process. Recovery now confirms the PID's command line really is a native host, re-confirms before escalating to the unblockable SIGKILL, and removes the PID file afterwards.
+  - **Attempt:** Route the health tool's Chrome wait and its IPC client wait through the same 10s timeout.
+    - **Outcome:** Did not work
+    - **Why:** Identical timeouts race, so the operator randomly got the ambiguous `IPC timeout` instead of the definitive "Chrome did not answer". The host's wait for Chrome is now strictly shorter than the client's wait for the host, and a test pins that ordering.
+- **Root cause:** Two compounding gaps. (1) The host registers JS signal handlers, which disables the kernel's default terminate action, so any state that stops the event loop makes the process unkillable by SIGTERM. (2) No IPC action was answered locally, so liveness was observable only through Chrome, and nothing external supervised the host — Chrome owns its lifecycle and does not restart a wedged one. The specific trigger that stopped this host's loop was not captured before the process was killed and remains unidentified.
+- **Resolution:**
+  - Added a locally-answered `hostPing` IPC action plus `livenessSnapshot()` in `src/native-host.ts`, deliberately never forwarded to Chrome.
+  - The host now writes a mode-`0600` PID file next to its socket so an external probe can signal it; it is removed on clean shutdown and never clobbers a live host's file.
+  - Signal shutdown wrapped in `try/finally` so `process.exit(0)` runs even if cleanup throws, with a comment stating the wedged-loop limitation.
+  - Added `src/watchdog.ts` (`npm run watchdog`), classifying `alive` / `wedged` / `stale-socket` / `down`, with `--recover` escalating SIGTERM → SIGKILL.
+  - `chrome_controller_health` now probes the host first and returns the host state plus remediation instead of hanging.
+- **Verification:** Ran the watchdog against the live host, which is what exposed the misclassification above and confirmed the corrected `alive` result. `npm test` all pass, `npm run typecheck` and `npm run lint` clean. Tests reproduce the real failures rather than mocking them: a child process with an empty SIGTERM handler proves the escalation path, a SIGKILLed child proves the stale-socket case, an accept-and-ignore server proves the wedged classification, and a host with no Chrome peer proves `hostPing` answers locally.
+- **Prevention/follow-up:** `npm run watchdog` is the first diagnostic for any hang. The watchdog's own probe reassembles chunked responses and bounds its read buffer; both are pinned by mutation-tested cases, because a split response misclassified as `wedged` would send an operator to SIGKILL a healthy host. Remaining follow-up: the wedge trigger itself is unidentified, so the watchdog detects the state rather than preventing it; if it recurs, capture `sample <pid>` or a SIGQUIT stack **before** killing the process.
+- **Reusable learning:** Any long-lived process that registers JS signal handlers can become signal-proof, and a health check routed through the very peer that may be dead cannot diagnose its own transport. Expose a liveness endpoint the process answers by itself, publish a PID so something outside can escalate to SIGKILL, and never assume SIGTERM succeeded because the shell returned 0.
+- **References:** `src/native-host.ts`, `src/watchdog.ts`, `src/watchdog.test.ts`, `src/mcp.ts`, `docs/user-guide.md`. Related: `docs/leanings/2026-09-20-startup-artifacts-need-owned-lifecycle.md`, `docs/leanings/2026-09-20-listener-startup-errors-must-reject-ready.md`.
