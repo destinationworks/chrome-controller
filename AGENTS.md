@@ -57,6 +57,8 @@ While actively working, reread `user-updates.md` for new instructions at least o
 - For non-trivial features, bug fixes, or test additions, automatically spawn an adversarial test-critic subagent to review the tests. The critic must evaluate whether the suite verifies real behavior vs artificial line coverage, identifies missing edge cases, and flags fragile/vacuous tests before work is completed.
 - Never use coverage bypass comments (e.g. `/* v8 ignore */`, `#[cfg(not(coverage))]`, `# pragma: no cover`) to bypass coverage gates. All code in the repository must be reachable and exercised by tests; dead or unreachable code must be deleted rather than kept or suppressed (except rare compiler/type-exhaustiveness edge cases where a branch is syntactically required but provably unreachable at runtime).
 - If you create or modify a test file, run it and iterate on test or implementation until it passes.
+- Never switch a production transport off in tests (e.g. `NODE_ENV === 'test'` gates). Inject its endpoint and timeouts (IPC tests use a fake `net.Server` via `CHROME_CONTROLLER_SOCKET`) so the real code path runs.
+- Only a failed connect proves an IPC request was never delivered. Timeouts and protocol errors must never be replayed over the HTTP relay (`src/ipc-client.ts`).
 
 ## Issues and PRs
 
