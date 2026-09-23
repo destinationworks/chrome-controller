@@ -218,6 +218,18 @@ pi -e /path/to/chrome-controller/src/index.ts
   alive and its socket still accepts connections, but it answers nothing, and SIGTERM will not stop it.
   Run `npm run watchdog` to identify the state and `npm run watchdog -- --recover` to clear it, then
   toggle the extension off and on at `chrome://extensions` to make Chrome spawn a fresh host.
+- MCP tool errors say which side failed. Only `NATIVE_IPC_UNAVAILABLE` means the socket could not be
+  reached (no host, or a stale socket), and only that error may fall back to the HTTP relay when
+  `CHROME_CONTROLLER_ALLOW_RELAY=1`:
+  - `NATIVE_IPC_UNAVAILABLE`: the connection could not be opened. The request never reached the host.
+  - `NATIVE_IPC_TIMEOUT`: the host accepted the request but did not answer in time. The host is either
+    wedged or still waiting on a slow Chrome; `npm run watchdog` tells them apart.
+  - `NATIVE_IPC_PROTOCOL_ERROR`: the host closed or broke the connection, or sent an unreadable answer.
+  - Any other message (for example `The extensions gallery cannot be scripted.`) is the host's own
+    answer, passed through unchanged. The host is healthy; the command itself failed.
+
+  Timeouts and protocol errors are never retried automatically, because the command may already have
+  run in Chrome.
 - Communication with agent processes occurs over the user-isolated Unix socket `~/.chrome-controller/run/chrome-controller.sock` (or `$XDG_RUNTIME_DIR/chrome-controller/run.sock` when that variable is set), in a directory created with mode `0700` and verified to be owned by the current user.
 - No listening TCP ports are opened, preventing any local network sniffing or unauthorized local access.
 

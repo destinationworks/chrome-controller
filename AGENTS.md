@@ -23,6 +23,11 @@ The controller supports two operational modes:
    Then re-enable the extension at `chrome://extensions` so Chrome spawns a fresh host
    (Web Store installs have no Reload button; the enable toggle restarts the service worker).
 
+   A failed browser tool is not evidence that the host died. The MCP server labels only a failed
+   connect as `NATIVE_IPC_UNAVAILABLE`; an unprefixed error is the host's own answer (e.g. Chrome
+   refusing to script `chromewebstore.google.com`). Confirm host state with `npm run watchdog`
+   before reporting it.
+
 2. **Standalone Relay Server (Fallback / Tests):**
    If Native Messaging is unavailable, run:
    ```bash
