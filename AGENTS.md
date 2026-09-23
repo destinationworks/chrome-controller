@@ -64,6 +64,7 @@ While actively working, reread `user-updates.md` for new instructions at least o
 - If you create or modify a test file, run it and iterate on test or implementation until it passes.
 - Never switch a production transport off in tests (e.g. `NODE_ENV === 'test'` gates). Inject its endpoint and timeouts (IPC tests use a fake `net.Server` via `CHROME_CONTROLLER_SOCKET`) so the real code path runs.
 - Only a failed connect proves an IPC request was never delivered. Timeouts and protocol errors must never be replayed over the HTTP relay (`src/ipc-client.ts`).
+- `src/ipc-client.ts` is the only IPC client; the Pi extension and the MCP server both wrap it. Do not add another copy: a transport fix landed in one copy and not the other.
 
 ## Issues and PRs
 

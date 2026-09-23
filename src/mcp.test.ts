@@ -20,6 +20,7 @@ import {
   HEALTH_PROBE_TIMEOUT_MS,
   HEALTH_CHROME_WAIT_MS,
   HEALTH_IPC_CLIENT_TIMEOUT_MS,
+  HostRejectedError,
   type IpcError,
 } from './mcp.js';
 import { removeDiscovery, writeDiscovery } from './discovery.js';
@@ -369,7 +370,7 @@ test('sendCommand dispatches getConsoleLogs and cleanupManagedTabs over IPC', as
 
 // ── IPC failure classification ───────────────────────────────────────────────
 //
-// sendIpcCommand rejects for different reasons that need different answers:
+// sendCommand's IPC path rejects for different reasons that need different answers:
 // a request that never reached the host (unavailable, safe to relay), a host
 // that got the request but did not answer (timeout / protocol, outcome
 // unknown), and a host that answered { success: false } (the real result).
@@ -860,6 +861,259 @@ test('sendCommand decodes a multi-byte character split across IPC reads', IPC_TE
     });
   } finally {
     await host.close();
+  }
+});
+
+/** IPC only: relay fallback disabled, so a regression that relays fails instead of reaching a real relay. */
+function ipcOnlyEnv(socket: string): Record<string, string | undefined> {
+  return { CHROME_CONTROLLER_SOCKET: socket, CHROME_CONTROLLER_ALLOW_RELAY: undefined, HTTP_PORT: undefined };
+}
+
+/** Gives a connection the client should not have opened time to reach the server. */
+const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 50));
+
+test('sendCommand reads a multi-megabyte answer well within the IPC timeout', IPC_TEST, async () => {
+  if (process.platform === 'win32') return;
+  // Screenshots and video frames are this large. Rescanning the whole buffer
+  // for the newline on every read was quadratic: 16 MB took ~5-9 s on macOS,
+  // long enough to be reported as a wedged host. The answer is written in
+  // paced 8 KB slices so the client sees many small reads on every platform
+  // (Linux would otherwise deliver fewer, larger reads and hide the cost).
+  const frame = 'A'.repeat(16 * 1024 * 1024);
+  const answer = Buffer.from(JSON.stringify({ success: true, result: { data: frame } }) + '\n');
+  const host = await startFakeHost((client) => {
+    let offset = 0;
+    const writeNext = () => {
+      if (offset >= answer.length || client.destroyed) return;
+      const slice = answer.subarray(offset, offset + 8192);
+      offset += slice.length;
+      client.write(slice, () => setImmediate(writeNext));
+    };
+    writeNext();
+  });
+  try {
+    await withEnv(ipcOnlyEnv(host.socket), async () => {
+      const started = Date.now();
+      // The IPC timeout is well above the budget, so a slow read reports
+      // how slow instead of an ambiguous NATIVE_IPC_TIMEOUT.
+      const result = await sendCommand('captureScreenshot', { tabId: 1 }, 12_000) as { data: string };
+      const elapsed = Date.now() - started;
+      assert.strictEqual(result.data.length, frame.length);
+      assert.ok(result.data === frame, 'the answer must arrive intact');
+      assert.ok(elapsed < 3000, `took ${elapsed}ms`);
+    });
+  } finally {
+    await host.close();
+  }
+});
+
+test('sendCommand treats a numeric socket path as a path and never dials a TCP port', IPC_TEST, async () => {
+  if (process.platform === 'win32') return;
+  // net.connect('8898') dials TCP 127.0.0.1:8898, the relay's port. A live TCP
+  // listener on the numeric "path" proves the client does not reach it.
+  let tcpConnections = 0;
+  const tcp = net.createServer((client) => { tcpConnections++; client.destroy(); });
+  await new Promise<void>((resolve) => tcp.listen(0, '127.0.0.1', () => resolve()));
+  const port = String((tcp.address() as net.AddressInfo).port);
+  try {
+    await withEnv(ipcOnlyEnv(port), async () => {
+      await assert.rejects(
+        () => sendCommand('queryTabs', {}, 2000),
+        (err: IpcError) => {
+          assert.strictEqual(err.kind, 'unavailable');
+          assert.match(err.message, /^NATIVE_IPC_UNAVAILABLE: .*ENOENT/);
+          return true;
+        },
+      );
+    });
+    await settle();
+    assert.strictEqual(tcpConnections, 0);
+  } finally {
+    await new Promise<void>((resolve) => tcp.close(() => resolve()));
+  }
+});
+
+test('sendCommand rejects an unserializable payload without connecting to the host', IPC_TEST, async () => {
+  if (process.platform === 'win32') return;
+  // Serializing inside the connect callback threw there, outside the promise,
+  // instead of failing the one tool call.
+  const host = await startFakeHost((client) => {
+    client.write(JSON.stringify({ success: true, result: 'should not be reached' }) + '\n');
+  });
+  try {
+    await withEnv(ipcOnlyEnv(host.socket), async () => {
+      await assert.rejects(() => sendCommand('evaluateOnPage', { tabId: 1, value: 1n }, 2000), TypeError);
+    });
+    await settle();
+    assert.strictEqual(host.disconnects.length, 0, 'no connection may be opened for a request that cannot be sent');
+  } finally {
+    await host.close();
+  }
+});
+
+test('sendCommand rejects an invalid IPC timeout before connecting instead of reporting a host timeout', IPC_TEST, async () => {
+  if (process.platform === 'win32') return;
+  const host = await startFakeHost(() => {});
+  try {
+    await withEnv(ipcOnlyEnv(host.socket), async () => {
+      for (const timeoutMs of [0, -1, 1.5, Number.NaN, 2 ** 31]) {
+        await assert.rejects(() => sendCommand('queryTabs', {}, timeoutMs), RangeError, String(timeoutMs));
+      }
+    });
+    await settle();
+    assert.strictEqual(host.disconnects.length, 0);
+  } finally {
+    await host.close();
+  }
+});
+
+test('sendCommand reports an object answer without a boolean success as malformed, not as a rejection', IPC_TEST, async () => {
+  if (process.platform === 'win32') return;
+  const relay = await startFakeRelay();
+  try {
+    for (const answer of [{ result: 1 }, { success: 'false', error: 'x' }, { success: 1, result: 1 }]) {
+      const host = await startFakeHost((client) => client.write(JSON.stringify(answer) + '\n'));
+      try {
+        await withEnv(relayAllowedEnv(host.socket, relay.instance), async () => {
+          await assert.rejects(
+            () => sendCommand('queryTabs', {}, 2000),
+            (err: IpcError) => {
+              assert.strictEqual(err.kind, 'protocol', JSON.stringify(answer));
+              assert.match(err.message, /^NATIVE_IPC_PROTOCOL_ERROR: .*returned a malformed response without a boolean success/);
+              assert.match(err.message, NOT_RETRIED);
+              return true;
+            },
+          );
+        });
+      } finally {
+        await host.close();
+      }
+    }
+    assert.strictEqual(relay.hits.length, 0, 'the host was reached, so the request must not be replayed');
+  } finally {
+    await relay.close();
+  }
+});
+
+test('sendCommand resolves the host result as-is, including falsy results', IPC_TEST, async () => {
+  if (process.platform === 'win32') return;
+  // A falsy result (0, '', null, false) is a real answer and must not be
+  // mistaken for "no IPC answer" and sent to the relay.
+  const relay = await startFakeRelay();
+  try {
+    for (const result of [0, '', null, false, [], { nested: { ok: true } }]) {
+      const host = await startFakeHost((client) => client.write(JSON.stringify({ success: true, result }) + '\n'));
+      try {
+        await withEnv(relayAllowedEnv(host.socket, relay.instance), async () => {
+          assert.deepStrictEqual(await sendCommand('evaluateOnPage', { tabId: 1 }), result);
+        });
+        assert.deepStrictEqual(host.requests, [{ action: 'evaluateOnPage', tabId: 1 }]);
+      } finally {
+        await host.close();
+      }
+    }
+    assert.strictEqual(relay.hits.length, 0);
+  } finally {
+    await relay.close();
+  }
+});
+
+test('sendCommand reports a host rejection as a HostRejectedError', IPC_TEST, async () => {
+  if (process.platform === 'win32') return;
+  const host = await startFakeHost((client) => client.write(JSON.stringify({ success: false, error: 'nope' }) + '\n'));
+  try {
+    await withEnv(ipcOnlyEnv(host.socket), async () => {
+      await assert.rejects(() => sendCommand('queryTabs', {}, 2000), (err: Error) => {
+        assert.ok(err instanceof HostRejectedError);
+        assert.strictEqual(err.name, 'HostRejectedError');
+        assert.strictEqual(err.message, 'nope');
+        return true;
+      });
+    });
+  } finally {
+    await host.close();
+  }
+});
+
+test('sendCommand names the MCP relay settings, not the Pi ones, when IPC is unavailable', IPC_TEST, async () => {
+  const missing = path.join(os.tmpdir(), `mcp-missing-${process.pid}-${Date.now()}.sock`);
+  await withEnv(ipcOnlyEnv(missing), async () => {
+    await assert.rejects(() => sendCommand('queryTabs'), (err: IpcError) => {
+      assert.ok(err.message.includes('(set CHROME_CONTROLLER_ALLOW_RELAY=1 or HTTP_PORT)'), err.message);
+      assert.doesNotMatch(err.message, /CHROME_CONTROLLER_URL/);
+      return true;
+    });
+  });
+});
+
+const NATIVE_ONLY_CASES = [
+  ['extractSecretGuarded', {}],
+  ['injectSecretGuarded', { value: 'not-a-real-secret' }],
+  ['evaluateOnPage', { sensitive: true }],
+] as const;
+
+test('sendCommand keeps native-only actions on IPC even when HTTP_PORT routes everything else to the relay', IPC_TEST, async () => {
+  if (process.platform === 'win32') return;
+  const host = await startFakeHost((client) => client.write(JSON.stringify({ success: true, result: { via: 'ipc' } }) + '\n'));
+  const relay = await startFakeRelay();
+  const missing = path.join(os.tmpdir(), `mcp-missing-${process.pid}-${Date.now()}.sock`);
+  const httpEnv = (socket: string) => ({
+    CHROME_CONTROLLER_SOCKET: socket,
+    CHROME_CONTROLLER_INSTANCE: relay.instance,
+    HTTP_PORT: String(relay.port),
+    API_KEY: undefined,
+    CHROME_CONTROLLER_ALLOW_RELAY: undefined,
+  });
+  try {
+    await withEnv(httpEnv(host.socket), async () => {
+      for (const [action, params] of NATIVE_ONLY_CASES) {
+        assert.deepStrictEqual(await sendCommand(action, params), { via: 'ipc' }, action);
+      }
+    });
+    await withEnv(httpEnv(missing), async () => {
+      for (const [action, params] of NATIVE_ONLY_CASES) {
+        await assert.rejects(() => sendCommand(action, params), (err: IpcError) => {
+          assert.strictEqual(err.kind, 'unavailable', action);
+          assert.match(err.message, /never sent over the relay/);
+          return true;
+        });
+      }
+    });
+    assert.deepStrictEqual(host.requests.map((r) => r.action), NATIVE_ONLY_CASES.map(([action]) => action));
+    assert.strictEqual(relay.hits.length, 0, 'sensitive payloads must never reach the relay');
+  } finally {
+    await host.close();
+    await relay.close();
+  }
+});
+
+test('sendCommand keeps the timeout and protocol labels for a native-only action the host received', IPC_TEST, async () => {
+  if (process.platform === 'win32') return;
+  const relay = await startFakeRelay();
+  try {
+    for (const [behaviour, kind, prefix] of [
+      [() => {}, 'timeout', /^NATIVE_IPC_TIMEOUT: /],
+      [(client: net.Socket) => client.end(), 'protocol', /^NATIVE_IPC_PROTOCOL_ERROR: /],
+    ] as const) {
+      const host = await startFakeHost(behaviour as (client: net.Socket) => void);
+      try {
+        await withEnv(relayAllowedEnv(host.socket, relay.instance), async () => {
+          await assert.rejects(() => sendCommand('injectSecretGuarded', { value: 'not-a-real-secret' }, 500), (err: IpcError) => {
+            assert.strictEqual(err.kind, kind);
+            assert.match(err.message, prefix);
+            assert.match(err.message, NOT_RETRIED, 'the secret may already have been typed');
+            assert.doesNotMatch(err.message, /NATIVE_IPC_UNAVAILABLE|never sent over the relay/);
+            return true;
+          });
+        });
+        assert.strictEqual(host.requests.length, 1);
+      } finally {
+        await host.close();
+      }
+    }
+    assert.strictEqual(relay.hits.length, 0);
+  } finally {
+    await relay.close();
   }
 });
 

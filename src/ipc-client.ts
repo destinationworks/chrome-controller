@@ -2,8 +2,7 @@
  * Client side of the Native Messaging IPC socket. Every transport failure is
  * an IpcError whose `kind` says whether the request could have reached the
  * host, because that decides whether a caller may replay it over the HTTP
- * relay. Used by the Pi extension (index.ts); the MCP server (mcp.ts) still
- * has its own copy of this logic.
+ * relay. Used by the Pi extension (index.ts) and the MCP server (mcp.ts).
  */
 
 import net from 'node:net';
@@ -114,7 +113,7 @@ export function sendIpcRequest(
         return;
       }
       if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        fail(new IpcError('protocol', 'returned a response that is not a JSON object'));
+        fail(new IpcError('protocol', 'returned a malformed response that is not a JSON object'));
         return;
       }
       settle(() => {
