@@ -11,7 +11,17 @@ The controller supports two operational modes:
    ```bash
    npm run install-host gocbenlgkgeaiifofilndbnaeigpplca
    ```
-   Chrome connects automatically over stdio/IPC (`/tmp/chrome-controller.sock`).
+   Chrome connects automatically over stdio/IPC (`~/.chrome-controller/run/chrome-controller.sock`, or
+   `$XDG_RUNTIME_DIR/chrome-controller/run.sock` when that variable is set; override with `CHROME_CONTROLLER_SOCKET`).
+
+   If browser tools hang instead of failing, the host may be wedged: alive, socket bound,
+   answering nothing. SIGTERM is swallowed in that state. Diagnose and clear it with:
+   ```bash
+   npm run watchdog            # alive | wedged | stale-socket | down
+   npm run watchdog -- --recover   # escalates SIGTERM -> SIGKILL on a wedged host
+   ```
+   Then re-enable the extension at `chrome://extensions` so Chrome spawns a fresh host
+   (Web Store installs have no Reload button; the enable toggle restarts the service worker).
 
 2. **Standalone Relay Server (Fallback / Tests):**
    If Native Messaging is unavailable, run:

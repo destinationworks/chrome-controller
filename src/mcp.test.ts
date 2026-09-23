@@ -11,7 +11,16 @@ import * as net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { readDiscovery, getConfig, sendCommand } from './mcp.js';
+import {
+  readDiscovery,
+  getConfig,
+  sendCommand,
+  buildHealthReport,
+  HOST_STATE_REMEDIATION,
+  HEALTH_PROBE_TIMEOUT_MS,
+  HEALTH_CHROME_WAIT_MS,
+  HEALTH_IPC_CLIENT_TIMEOUT_MS,
+} from './mcp.js';
 import { removeDiscovery, writeDiscovery } from './discovery.js';
 
 const TEST_API_KEY = 'test-key-0123456789abcdef01234567';
@@ -381,4 +390,75 @@ test('sendCommand dispatches getConsoleLogs and cleanupManagedTabs over IPC', as
     else delete process.env.CHROME_CONTROLLER_SOCKET;
     fs.rmSync(tmpBase, { recursive: true, force: true });
   }
+});
+
+test('buildHealthReport never consults Chrome when the host is not alive', async () => {
+  for (const state of ['wedged', 'stale-socket', 'down'] as const) {
+    let queried = false;
+    const report = await buildHealthReport(
+      async () => ({ state, socketPath: '/s', pid: 1, detail: `host is ${state}` }),
+      async () => { queried = true; return []; },
+    );
+    assert.strictEqual(queried, false, `${state} must not hang on a Chrome round-trip`);
+    assert.strictEqual(report.success, false);
+    assert.strictEqual(report.hostState, state);
+    assert.strictEqual(report.extensionConnected, false);
+    assert.strictEqual(report.remediation, HOST_STATE_REMEDIATION[state]);
+    assert.strictEqual(report.detail, `host is ${state}`);
+  }
+});
+
+test('buildHealthReport separates a silent extension from a healthy host', async () => {
+  const report = await buildHealthReport(
+    async () => ({ state: 'alive', socketPath: '/s', pid: 1, detail: 'ok' }),
+    async () => { throw new Error('Native Messaging request timed out after 8000ms'); },
+  );
+  assert.strictEqual(report.success, false);
+  assert.strictEqual(report.hostState, 'alive');
+  assert.strictEqual(report.extensionConnected, false);
+  assert.match(String(report.detail), /host is healthy but Chrome did not answer/);
+  assert.match(String(report.detail), /timed out after 8000ms/);
+  assert.strictEqual(report.remediation, HOST_STATE_REMEDIATION.extensionSilent);
+});
+
+test('buildHealthReport reports success when both sides answer', async () => {
+  const report = await buildHealthReport(
+    async () => ({ state: 'alive', socketPath: '/s', pid: 1, detail: 'ok' }),
+    async () => [{ id: 1, url: 'https://example.test/' }],
+  );
+  assert.strictEqual(report.success, true);
+  assert.strictEqual(report.hostState, 'alive');
+  assert.strictEqual(report.extensionConnected, true);
+  assert.deepStrictEqual(report.result, [{ id: 1, url: 'https://example.test/' }]);
+});
+
+test('buildHealthReport degrades to structured output when the probe itself throws', async () => {
+  let queried = false;
+  const report = await buildHealthReport(
+    async () => { throw new Error('socket path is a symlink'); },
+    async () => { queried = true; return []; },
+  );
+  assert.strictEqual(queried, false);
+  assert.strictEqual(report.success, false);
+  assert.strictEqual(report.hostState, 'unknown');
+  assert.match(String(report.detail), /Could not probe the native host: socket path is a symlink/);
+  assert.strictEqual(typeof report.remediation, 'string');
+});
+
+test('every non-alive host state has remediation text', () => {
+  for (const state of ['wedged', 'stale-socket', 'down'] as const) {
+    assert.strictEqual(typeof HOST_STATE_REMEDIATION[state], 'string');
+    assert.ok(HOST_STATE_REMEDIATION[state].length > 0);
+  }
+  assert.ok(HOST_STATE_REMEDIATION.extensionSilent.includes('chrome://extensions'));
+});
+
+test('health waits are ordered so the host answers before the IPC client gives up', () => {
+  // Equal timeouts race: whichever fires first decides whether the operator
+  // sees the ambiguous "IPC timeout" or the definitive "Chrome did not answer".
+  assert.ok(
+    HEALTH_CHROME_WAIT_MS < HEALTH_IPC_CLIENT_TIMEOUT_MS,
+    'the host must give up on Chrome before the IPC client gives up on the host',
+  );
+  assert.ok(HEALTH_PROBE_TIMEOUT_MS < HEALTH_CHROME_WAIT_MS);
 });

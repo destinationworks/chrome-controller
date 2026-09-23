@@ -38,6 +38,23 @@ export function ensureSocketDir(socketPath: string): void {
   }
 }
 
+export function pidFilePathForSocket(socketPath: string): string {
+  if (process.platform === 'win32') {
+    return path.join(os.homedir(), '.chrome-controller', 'run', 'chrome-controller.pid');
+  }
+  return path.join(path.dirname(socketPath), 'chrome-controller.pid');
+}
+
+export function readHostPid(socketPath: string): number | null {
+  try {
+    const raw = fs.readFileSync(pidFilePathForSocket(socketPath), 'utf8').trim();
+    const pid = Number(raw);
+    return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
 interface SocketIdentity {
   dev: number;
   ino: number;
@@ -244,6 +261,9 @@ export class NativeMessagingHost {
   private sensitiveExtractionInProgress = false;
   private browserOutputQuarantined = false;
   private closed = false;
+  private pidFileWritten = false;
+  private lastChromeMessageAt: number | null = null;
+  public readonly startedAt = Date.now();
   public readonly ready: Promise<void>;
 
   constructor(customSocketPath?: string) {
@@ -308,6 +328,7 @@ export class NativeMessagingHost {
   }
 
   private handleMessageFromChrome(msg: NativeMessage) {
+    this.lastChromeMessageAt = Date.now();
     if (msg.id !== undefined) {
       if (!this.pendingRequests.has(msg.id)) return;
       const { resolve, reject } = this.pendingRequests.get(msg.id)!;
@@ -569,6 +590,56 @@ export class NativeMessagingHost {
     }
   }
 
+  /**
+   * Local liveness snapshot. Deliberately answered by the host itself and never
+   * forwarded to Chrome, so a probe can distinguish "host wedged / Chrome gone"
+   * from "Chrome is merely slow to answer a real command".
+   */
+  public livenessSnapshot(): Record<string, unknown> {
+    return {
+      pong: true,
+      pid: process.pid,
+      startedAt: this.startedAt,
+      uptimeMs: Date.now() - this.startedAt,
+      chromeConnected: this.isConnectedToChrome,
+      lastChromeMessageAt: this.lastChromeMessageAt,
+      pendingRequests: this.pendingRequests.size,
+      sensitiveExtractionInProgress: this.sensitiveExtractionInProgress,
+      browserOutputQuarantined: this.browserOutputQuarantined,
+    };
+  }
+
+  private writePidFile(): void {
+    const pidPath = pidFilePathForSocket(this.socketPath);
+    // writeFileSync's `mode` applies only when it creates the file, and it
+    // follows symlinks -- so a pre-existing 0644 file would stay world-readable
+    // and a planted symlink would be written through. Remove any leftover first
+    // (the socket bind already proved no other host is live) and create
+    // exclusively. Unlink removes a symlink itself, never its target.
+    try {
+      fs.unlinkSync(pidPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    fs.writeFileSync(pidPath, `${process.pid}\n`, { mode: 0o600, flag: 'wx' });
+    this.pidFileWritten = true;
+  }
+
+  private removePidFile(): void {
+    if (!this.pidFileWritten) return;
+    this.pidFileWritten = false;
+    const pidPath = pidFilePathForSocket(this.socketPath);
+    try {
+      const raw = fs.readFileSync(pidPath, 'utf8').trim();
+      if (Number(raw) !== process.pid) return;
+      fs.unlinkSync(pidPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        console.error(`Error cleaning up PID file ${pidPath}:`, error);
+      }
+    }
+  }
+
   private async setupIpcServer(): Promise<void> {
     const socketPath = this.socketPath;
     ensureSocketDir(socketPath);
@@ -578,7 +649,16 @@ export class NativeMessagingHost {
     const MAX_LINE_BYTES = 10 * 1024 * 1024; // 10MB line buffer cap
 
     this.ipcServer = net.createServer((client) => {
-      let lineBuffer = Buffer.alloc(0);
+      // Incomplete tail of the current line, held as unmerged chunks. Kernel
+      // reads arrive in ~8KB pieces, so concatenating the accumulated buffer on
+      // every chunk copied O(n^2) bytes: feeding a 10MB line copied ~6.4GB and
+      // blocked the event loop for seconds -- itself a wedge, reachable by any
+      // local process that can open the socket. Chunks are joined once, when
+      // the line is complete.
+      let pending: Buffer[] = [];
+      let pendingLen = 0;
+
+      const resetPending = () => { pending = []; pendingLen = 0; };
 
       client.on('error', (err) => {
         console.error('IPC client error:', err);
@@ -586,54 +666,76 @@ export class NativeMessagingHost {
 
       client.on('data', async (chunk) => {
         const chunkBuffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-        lineBuffer = Buffer.concat([lineBuffer, chunkBuffer]);
-        if (lineBuffer.length > MAX_LINE_BYTES) {
+        const lines: Buffer[] = [];
+        let offset = 0;
+        let newlineIndex: number;
+
+        while ((newlineIndex = chunkBuffer.indexOf(0x0a, offset)) >= 0) {
+          const segment = chunkBuffer.subarray(offset, newlineIndex);
+          if (pendingLen + segment.length > MAX_LINE_BYTES) {
+            resetPending();
+            client.destroy(new Error('IPC line exceeds maximum size limit (10MB)'));
+            return;
+          }
+          lines.push(pendingLen === 0 ? segment : Buffer.concat([...pending, segment]));
+          resetPending();
+          offset = newlineIndex + 1;
+        }
+
+        const tail = chunkBuffer.subarray(offset);
+        if (pendingLen + tail.length > MAX_LINE_BYTES) {
+          resetPending();
           client.destroy(new Error('IPC line exceeds maximum size limit (10MB)'));
           return;
         }
+        if (tail.length > 0) {
+          pending.push(tail);
+          pendingLen += tail.length;
+        }
 
-        let newlineIndex: number;
-        while ((newlineIndex = lineBuffer.indexOf(0x0a)) >= 0) {
-          const lineBytes = lineBuffer.subarray(0, newlineIndex);
-          lineBuffer = lineBuffer.subarray(newlineIndex + 1);
+        for (const lineBytes of lines) {
           const line = lineBytes.toString('utf8');
           if (!line.trim()) continue;
+          try {
+            const req = JSON.parse(line) as { id?: number; action: string; [key: string]: unknown };
+            const { action, id, ...params } = req;
             try {
-              const req = JSON.parse(line) as { id?: number; action: string; [key: string]: unknown };
-              const { action, id, ...params } = req;
-              try {
-                if (this.browserOutputQuarantined) {
-                  throw new Error('Browser output is quarantined after an indeterminate guarded extraction; close the source tab manually before restarting the native host');
-                }
-                if (this.sensitiveExtractionInProgress) {
-                  throw new Error('Browser output is locked during guarded extraction');
-                }
-                if (action === 'extractSecretGuarded') {
-                  const result = await this.extractSecretGuarded(params);
-                  client.write(JSON.stringify({ id, success: true, result }) + '\n');
-                  continue;
-                }
-                if (action === 'injectSecretGuarded') {
-                  const result = await this.injectSecretGuarded(params);
-                  client.write(JSON.stringify({ id, success: true, result }) + '\n');
-                  continue;
-                }
-                const result = await this.requestFromChrome(action, stripInternalSensitiveParams(params));
-                client.write(JSON.stringify({
-                  id,
-                  success: true,
-                  result: this.sanitizeSensitiveOutput(result),
-                }) + '\n');
-              } catch (err) {
-                client.write(JSON.stringify({
-                  id,
-                  success: false,
-                  error: this.sanitizeSensitiveOutput((err as Error).message),
-                }) + '\n');
+              if (action === 'hostPing') {
+                client.write(JSON.stringify({ id, success: true, result: this.livenessSnapshot() }) + '\n');
+                continue;
               }
-            } catch {
-              client.write(JSON.stringify({ success: false, error: 'Invalid IPC JSON payload' }) + '\n');
+              if (this.browserOutputQuarantined) {
+                throw new Error('Browser output is quarantined after an indeterminate guarded extraction; close the source tab manually before restarting the native host');
+              }
+              if (this.sensitiveExtractionInProgress) {
+                throw new Error('Browser output is locked during guarded extraction');
+              }
+              if (action === 'extractSecretGuarded') {
+                const result = await this.extractSecretGuarded(params);
+                client.write(JSON.stringify({ id, success: true, result }) + '\n');
+                continue;
+              }
+              if (action === 'injectSecretGuarded') {
+                const result = await this.injectSecretGuarded(params);
+                client.write(JSON.stringify({ id, success: true, result }) + '\n');
+                continue;
+              }
+              const result = await this.requestFromChrome(action, stripInternalSensitiveParams(params));
+              client.write(JSON.stringify({
+                id,
+                success: true,
+                result: this.sanitizeSensitiveOutput(result),
+              }) + '\n');
+            } catch (err) {
+              client.write(JSON.stringify({
+                id,
+                success: false,
+                error: this.sanitizeSensitiveOutput((err as Error).message),
+              }) + '\n');
             }
+          } catch {
+            client.write(JSON.stringify({ success: false, error: 'Invalid IPC JSON payload' }) + '\n');
+          }
         }
       });
     });
@@ -685,6 +787,17 @@ export class NativeMessagingHost {
           rejectStartup(new Error('Native Host IPC startup was cancelled after binding'));
           return;
         }
+        try {
+          this.writePidFile();
+        } catch (error) {
+          try { this.ipcServer!.close(); } catch { /* ignore cleanup error */ }
+          if (this.ipcSocketIdentity) {
+            removeSocketIfOwned(socketPath, this.ipcSocketIdentity);
+            this.ipcSocketIdentity = null;
+          }
+          rejectStartup(new Error(`Native Host PID file write failed: ${(error as Error).message}`));
+          return;
+        }
         console.error(`Native Host IPC listening on ${socketPath}`);
         resolveStartup();
       });
@@ -713,6 +826,7 @@ export class NativeMessagingHost {
         this.ipcSocketIdentity = null;
       }
     }
+    this.removePidFile();
     process.stdin.pause();
     process.stdin.removeAllListeners('data');
     process.stdin.removeAllListeners('end');
@@ -731,6 +845,23 @@ if (isMain) {
     process.exitCode = 1;
   });
 
-  process.on('SIGINT', () => { host.close(); process.exit(0); });
-  process.on('SIGTERM', () => { host.close(); process.exit(0); });
+  // Exit is guaranteed even if cleanup throws: a shutdown that never reached
+  // process.exit() left signal-proof hosts alive holding the IPC socket.
+  //
+  // NOTE: this cannot rescue a wedged event loop. Registering a JS signal
+  // handler replaces the default terminate action, so if the loop stops
+  // turning the handler never runs and SIGTERM is swallowed entirely. Only
+  // SIGKILL, or the watchdog's escalation (scripts/watchdog), recovers that.
+  const shutdown = (signal: string) => {
+    try {
+      host.close();
+    } catch (error) {
+      console.error(`Native Messaging host shutdown cleanup failed on ${signal}:`, error);
+    } finally {
+      process.exit(0);
+    }
+  };
+
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
 }

@@ -2,7 +2,8 @@
  * Pi / Antigravity extension entry point for Chrome Controller.
  *
  * Registers all chrome_* tools with the Pi agent runtime.
- * Tools communicate via Native Messaging IPC socket (/tmp/chrome-controller.sock)
+ * Tools communicate via Native Messaging IPC socket (~/.chrome-controller/run/chrome-controller.sock;
+ * see getSocketPath() in native-host.ts for platform and env overrides)
  * with fallback to the local HTTP relay server (src/server.ts) on port 8898.
  */
 
