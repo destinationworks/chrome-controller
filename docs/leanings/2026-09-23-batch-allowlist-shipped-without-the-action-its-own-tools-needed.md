@@ -1,0 +1,43 @@
+# 2026-09-23 — The batch allowlist shipped without the action its own input tools needed
+
+- **Status:** Resolved
+- **Task/context:** `chrome_type_text` and `chrome_mouse` (MCP in `src/mcp.ts`, pi in `src/index.ts`) send a `batch`: `ensureDebugger`, then `sendCommand` items carrying `Input.insertText` or `Input.dispatchMouseEvent`. Found while measuring action timings for the IPC timeout fix (`2026-09-23-ipc-client-gave-up-before-the-host-it-was-waiting-on.md`).
+- **Unexpected observation or failure:** Every call failed with `Batch item 1 specifies disallowed action "sendCommand"`. The extension's `ALLOWED_BATCH_ACTIONS` (`Chrome Extension/background.js`) and the relay's copy (`src/server.ts`) both omitted `sendCommand`.
+- **Evidence:**
+  - Through the native host against a live Chrome, a sequential batch of `ensureDebugger` plus `sendCommand` `Input.insertText` was rejected in 8 ms. The same `sendCommand` sent as a top-level action typed 52 characters successfully.
+  - Before the fix, the new regression tests failed with exactly that message. They feed the real payloads from both clients into the real extension worker, and the MCP payloads into the real relay.
+- **Approaches tried:**
+  - **Attempt:** Decide whether the omission was a deliberate security boundary.
+    - **Outcome:** Worked
+    - **Why:** It was an omission:
+      - Commit a7988df added the allowlist and the two tools that depend on it at the same time.
+      - The only rationale on record (`2026-09-01-zero-ports-native-messaging-security-hardening-and-loopback-isolation.md`) is blocking arbitrary and nested batch actions.
+      - Leaving it out of batches did not protect the relay or the socket: top-level `sendCommand` accepts any CDP method from anyone holding the relay key or socket access. For agents it is different. Neither MCP nor pi exposes a top-level `sendCommand` tool, so `chrome_batch` is an agent's only route to raw CDP, and `BATCH_CDP_METHODS` is the agents' CDP boundary. That is why the admitted list has to stay exact.
+      - Every existing test used made-up action names, and no test ran either tool's payload through a real allowlist.
+  - **Attempt:** Add `sendCommand` to the allowlists without restriction.
+    - **Outcome:** Rejected
+    - **Why:** It would fix the tools but admit every raw CDP method into batches. The intent of the allowlist is least privilege, and the tools need only two methods.
+  - **Attempt:** Admit `sendCommand` in batches only for `Input.insertText` and `Input.dispatchMouseEvent` (`BATCH_CDP_METHODS`), in both the extension and the relay.
+    - **Outcome:** Worked
+    - **Why:** The tools work, raw CDP stays out of batches, and a refused batch forwards nothing, because the whole batch is validated before any item runs.
+- **Root cause:** An allowlist was added without a test that pushed the product's own real payloads through it. Its only tests exercised the rejection path with made-up action names.
+- **Second defect, found by adversarial review:** MCP's two tools still failed over the relay. The relay answers a batch with the BatchResult itself (`{mode, results, success}`, no `result`), and with HTTP 207 when an item fails. MCP's `sendCommand` resolved `parsed.result`, which is `undefined` and is rejected by the MCP SDK as an invalid tool result, and it turned a 207 into a bare `HTTP 207`, losing the item error. pi returns the whole body, so it was unaffected.
+- **Resolution:**
+  - Added `sendCommand` to both `ALLOWED_BATCH_ACTIONS` sets, gated by `BATCH_CDP_METHODS`. The method name is matched exactly, case-sensitive and string-only.
+  - The MCP tool payloads now come from exported `buildTypeTextBatch` and `buildMouseBatch`, so tests use the same bytes the tools send.
+  - MCP's relay path returns a batch's BatchResult whole, on 200 and 207, as the IPC path already did.
+  - A refused non-string `method` is named by its type. `String()` threw `Cannot convert object to primitive value` on `{"toString": "…"}`, which still refused the batch but hid why.
+- **Verification:**
+  - Regression tests run MCP and pi payloads for every mouse type, plus instant and animated typing, through the real worker, and MCP payloads through the real relay. They check that the exact CDP methods and events arrive.
+  - Negative tests cover, in both the worker and the relay, sequential and parallel: other domains, the sibling `Input.*` methods (key, drag, touch, `setIgnoreInputEvents`), a missing, array, number or object method, a wrong-case method and a trailing space. The worker test also asserts the debugger was never attached and the tab never grouped.
+  - The MCP builders' full `commandParams` are pinned, and a test drives MCP `sendCommand` against the real relay, including a failed item.
+  - The review's surviving mutants were each re-run and are now caught: any `Input.*` admitted (worker, relay), case-insensitive or `String()` matching on the relay, the check applied only to sequential batches, the mouse button forced to `none`, x/y swapped, `clickCount` dropped, `sound` inverted, and the MCP relay fix reverted.
+  - A drift test holds the extension's and the relay's method lists equal. Four mutations (either check removed, an extra method, a dropped method) were each caught.
+  - `npm test`, `npm run typecheck` and `npm run lint` pass.
+  - Not verified against a live Chrome, because the installed extension is the Web Store build.
+  - Out of scope and reported separately: a batch validated once can still act on a tab that becomes protected mid-batch; a relay body with a falsy `actions` and a `commands` list skips the relay's batch validation (the extension's own check still applies); and the two `ALLOWED_BATCH_ACTIONS` sets differ, with entries that have no handler.
+- **Prevention/follow-up:**
+  - When a tool sends a batch, test its real payload against the real allowlist, not only the rejection path.
+  - The extension change reaches users only through a Chrome Web Store release. Until then the relay path works, since the relay splits batches into top-level messages, but the native path still rejects these batches.
+- **Reusable learning:** An allowlist needs a positive test for every legitimate caller. Otherwise it quietly breaks its own features, and every test stays green.
+- **References:** `Chrome Extension/background.js` (`BATCH_CDP_METHODS`), `src/server.ts`, `src/mcp.ts` (`buildTypeTextBatch`, `buildMouseBatch`), `src/extension-background.test.ts`, `src/server.test.ts`.

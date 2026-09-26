@@ -9,6 +9,7 @@ import * as assert from 'node:assert/strict';
 import * as test from 'node:test';
 import { WebSocket } from 'ws';
 import { createChromeControllerServer, writeDiscovery, readDiscovery, removeDiscovery, ServerConfig, ChromeControllerServer } from './server';
+import { buildMouseBatch, buildTypeTextBatch } from './mcp.js';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -762,4 +763,61 @@ test.describe('Server - Bearer Token Auth', () => {
 
 test.after(() => {
   http.globalAgent.destroy();
+});
+
+test.describe('Server - CDP input commands inside batches', () => {
+  test.it('forwards chrome_type_text and chrome_mouse input, and refuses other raw CDP', async () => {
+    const server = await createServer();
+    const received: Record<string, unknown>[] = [];
+    const ext = await new Promise<WebSocket>((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${server.wsPort}?key=${TEST_API_KEY}`);
+      ws.on('error', reject);
+      ws.on('message', (data: Buffer | string) => {
+        const msg = JSON.parse(data.toString());
+        received.push(msg);
+        ws.send(JSON.stringify({ id: msg.id, result: { ok: msg.action } }));
+      });
+      ws.on('open', () => setTimeout(() => resolve(ws), 50));
+    });
+    try {
+      for (const batch of [
+        buildTypeTextBatch({ tabId: 7, text: 'hi', instant: true }),
+        buildMouseBatch({ tabId: 7, action: 'click', x: 1, y: 2 }),
+      ]) {
+        const res = await post(server, { action: 'batch', ...batch });
+        assert.equal(res.status, 200, JSON.stringify(res.body));
+        assert.equal(res.body.success, true);
+      }
+      assert.deepEqual(
+        received.filter((msg) => msg.action === 'sendCommand').map((msg) => msg.method),
+        ['Input.insertText', 'Input.dispatchMouseEvent', 'Input.dispatchMouseEvent', 'Input.dispatchMouseEvent'],
+      );
+
+      const forwardedBefore = received.length;
+      // The relay splits a batch into top-level messages, which the extension's
+      // batch check never sees, so this is the only gate for relay batches.
+      const refused: unknown[] = [
+        'Runtime.evaluate', 'Page.navigate', undefined,
+        'Input.dispatchKeyEvent', 'Input.dispatchDragEvent', 'Input.setIgnoreInputEvents', 'Input.dispatchTouchEvent',
+        ['Input.insertText'], 'input.insertText', 'Input.insertText ', 7, { toString: 'Input.insertText' },
+      ];
+      for (const mode of ['sequential', 'parallel']) {
+        for (const method of refused) {
+          const res = await post(server, {
+            action: 'batch',
+            mode,
+            actions: [{ action: 'ensureDebugger', tabId: 7 }, { action: 'sendCommand', tabId: 7, method }],
+          });
+          const label = `${mode} ${JSON.stringify(method)}`;
+          assert.equal(res.status, 400, label);
+          assert.match(res.body.error, /Batch item 1 sends CDP method .* which batches do not allow/, label);
+        }
+      }
+      assert.equal(received.length, forwardedBefore, 'a refused batch forwards nothing, not even its allowed items');
+    } finally {
+      ext.close();
+      await delay(50);
+      server.close();
+    }
+  });
 });

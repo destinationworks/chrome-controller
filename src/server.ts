@@ -119,7 +119,12 @@ export const ALLOWED_BATCH_ACTIONS = new Set([
   'type',
   'getConsoleLogs',
   'cleanupManagedTabs',
+  'sendCommand',
 ]);
+
+/** Raw CDP stays out of batches except the input methods chrome_type_text and
+ *  chrome_mouse send. Keep in step with BATCH_CDP_METHODS in the extension. */
+export const BATCH_CDP_METHODS = new Set(['Input.insertText', 'Input.dispatchMouseEvent']);
 
 function isLoopbackAddress(addr?: string): boolean {
   if (!addr) return false;
@@ -351,6 +356,11 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
     if (obj.action === 'batch') throw new Error(`Batch item ${index} cannot be a nested batch`);
     if (!ALLOWED_BATCH_ACTIONS.has(obj.action)) {
       throw new Error(`Batch item ${index} specifies disallowed action "${obj.action}"`);
+    }
+    if (obj.action === 'sendCommand' && !(typeof obj.method === 'string' && BATCH_CDP_METHODS.has(obj.method))) {
+      // Only a string is named: String() throws on some JSON objects.
+      const method = typeof obj.method === 'string' ? obj.method : `<${typeof obj.method}>`;
+      throw new Error(`Batch item ${index} sends CDP method "${method}", which batches do not allow`);
     }
     const { action, ...params } = obj;
     return { action, params };

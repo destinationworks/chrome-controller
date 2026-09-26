@@ -15,6 +15,8 @@ import {
   readDiscovery,
   getConfig,
   sendCommand,
+  buildMouseBatch,
+  buildTypeTextBatch,
   buildHealthReport,
   HOST_STATE_REMEDIATION,
   HEALTH_PROBE_TIMEOUT_MS,
@@ -1421,7 +1423,7 @@ test('a request that cannot finish within the cap is refused before it reaches t
   try {
     // 5000 animated keystrokes at the default delay need more than 120 s of Chrome time.
     await assert.rejects(
-      () => sendCommand('batch', buildTypeTextBatchForTest('x'.repeat(5000))),
+      () => sendCommand('batch', buildTypeTextBatch({ tabId: 1, text: 'x'.repeat(5000) })),
       /^Error: batch needs at least \d+ms of Chrome time, beyond the 120000ms limit/,
     );
     // Never sent: a relay attempt would instead fail on the missing relay config.
@@ -1433,12 +1435,49 @@ test('a request that cannot finish within the cap is refused before it reaches t
   }
 });
 
-function buildTypeTextBatchForTest(text: string): Record<string, unknown> {
-  return {
-    mode: 'sequential',
-    actions: [
-      { action: 'ensureDebugger', tabId: 1 },
-      { action: 'sendCommand', tabId: 1, method: 'Input.insertText', commandParams: { text, animateTyping: true, typingDelayMs: 50 } },
-    ],
-  };
-}
+test('over the real relay, the input tools get the whole batch result, including a failed item', async () => {
+  const relay = createChromeControllerServer({ httpPort: 0, wsPort: 0, apiKey: TEST_API_KEY, writeDiscoveryFile: false });
+  await relay.ready;
+  const methods: string[] = [];
+  // Stands in for the extension: presses fail, everything else succeeds.
+  const extension = await new Promise<WebSocket>((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${relay.wsPort}?key=${TEST_API_KEY}`);
+    ws.on('error', reject);
+    ws.on('message', (data: Buffer | string) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.action === 'sendCommand') methods.push(`${msg.method} ${msg.commandParams?.type ?? ''}`.trim());
+      if (msg.commandParams?.type === 'mousePressed') ws.send(JSON.stringify({ id: msg.id, error: 'Target closed' }));
+      else ws.send(JSON.stringify({ id: msg.id, result: { ok: msg.action } }));
+    });
+    ws.on('open', () => setTimeout(() => resolve(ws), 50));
+  });
+  const saved = { HTTP_PORT: process.env.HTTP_PORT, API_KEY: process.env.API_KEY, SOCKET: process.env.CHROME_CONTROLLER_SOCKET };
+  process.env.HTTP_PORT = String(relay.httpPort);
+  process.env.API_KEY = TEST_API_KEY;
+  // HTTP_PORT bypasses IPC; if routing regresses, fail rather than reach a live host.
+  process.env.CHROME_CONTROLLER_SOCKET = path.join(os.tmpdir(), `mcp-no-host-${process.pid}.sock`);
+  try {
+    const typed = await sendCommand('batch', buildTypeTextBatch({ tabId: 7, text: 'hi', instant: true })) as { success: boolean; results: unknown[] };
+    assert.equal(typed.success, true, JSON.stringify(typed));
+    assert.equal(typed.results.length, 2);
+    // The tool serializes this; `undefined` would be an invalid MCP tool result.
+    assert.equal(typeof JSON.stringify(typed), 'string');
+
+    const clicked = await sendCommand('batch', buildMouseBatch({ tabId: 7, action: 'click', x: 1, y: 2 })) as { success: boolean; results: Array<Record<string, unknown>> };
+    assert.equal(clicked.success, false);
+    assert.match(JSON.stringify(clicked.results), /Target closed/, 'the failed item keeps its error');
+    assert.deepEqual(methods, [
+      'Input.insertText',
+      'Input.dispatchMouseEvent mouseMoved',
+      'Input.dispatchMouseEvent mousePressed',
+    ]);
+  } finally {
+    for (const [key, value] of [['HTTP_PORT', saved.HTTP_PORT], ['API_KEY', saved.API_KEY], ['CHROME_CONTROLLER_SOCKET', saved.SOCKET]] as const) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    extension.close();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    relay.close();
+  }
+});

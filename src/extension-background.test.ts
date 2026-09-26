@@ -11,6 +11,8 @@ import {
   chromeWaitMs,
   chromeWorkMs,
 } from './chrome-wait.js';
+import { buildMouseBatch, buildTypeTextBatch } from './mcp.js';
+import chromeControllerPiExtension from './index.ts';
 
 const TEST_API_KEY = 'test-key-0123456789abcdef01234567';
 const backgroundPath = path.join(
@@ -61,6 +63,7 @@ function createWorker(
   let queryTabsCalls = 0;
   let removeTabCalls = 0;
   let debuggerSendCalls = 0;
+  const chromeTouches: string[] = [];
   let storageWritesFailing = false;
 
   const nativePort = {
@@ -136,9 +139,9 @@ function createWorker(
       async sendMessage(tabId: number, message: Record<string, unknown>) {
         return options.tabsSendMessage ? options.tabsSendMessage(tabId, message) : {};
       },
-      async group() { return 1; },
+      async group() { chromeTouches.push('tabs.group'); return 1; },
       async remove() { removeTabCalls += 1; },
-      async update() { return {}; },
+      async update() { chromeTouches.push('tabs.update'); return {}; },
       async create() { return {}; },
     },
     tabGroups: {
@@ -149,7 +152,7 @@ function createWorker(
     },
     debugger: {
       onEvent: debuggerOnEvent,
-      async attach() {},
+      async attach() { chromeTouches.push('debugger.attach'); },
       async detach() {},
       async sendCommand(target: unknown, method: string, params?: unknown) {
         debuggerSendCalls += 1;
@@ -182,6 +185,7 @@ function createWorker(
     alarmState,
     debuggerOnEvent,
     debuggerSendCalls: () => debuggerSendCalls,
+    chromeTouches: () => [...chromeTouches],
     nativeMessages,
     nativeOnDisconnect,
     nativeOnMessage,
@@ -661,4 +665,158 @@ test('a batch of 40 ordinary actions at measured latency fits its per-item allow
   assert.equal(elapsed, 40 * measuredActionMs);
   assert.ok(elapsed > DEFAULT_CHROME_WAIT_MS, 'the ordinary wait alone would not cover it');
   assert.ok(elapsed < chromeWaitMs('batch', request), `took ${elapsed}ms, host waits ${chromeWaitMs('batch', request)}ms`);
+});
+
+// ── CDP input commands inside batches ──────────────────────────────────────
+//
+// chrome_type_text and chrome_mouse (MCP and pi) send their CDP input as
+// `sendCommand` items of a batch. The batch allowlist must admit exactly those
+// input methods and nothing else of raw CDP.
+
+async function runNativeBatch(batch: Record<string, unknown>) {
+  const cdpCalls: { method: string; params: any }[] = [];
+  const worker = createWorker(new Map(), {
+    debuggerSendCommand: async (_target, method, params) => { cdpCalls.push({ method, params }); return {}; },
+  });
+  await flushWorkerTasks();
+  await worker.nativeOnMessage.emit({ id: 1, action: 'batch', ...batch });
+  const response = worker.nativeMessages.find((message) => message.id === 1) as Record<string, any>;
+  return { response, cdpCalls, debuggerSendCalls: worker.debuggerSendCalls, chromeTouches: worker.chromeTouches };
+}
+
+/** Captures the payload a pi tool sends to the relay. */
+async function piPayload(tool: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const tools: Record<string, { execute: (...args: unknown[]) => Promise<unknown> }> = {};
+  chromeControllerPiExtension({ registerTool: (t: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) => { tools[t.name] = t; } } as never);
+  const saved = { url: process.env.CHROME_CONTROLLER_URL, key: process.env.CHROME_CONTROLLER_API_KEY, fetch: global.fetch };
+  process.env.CHROME_CONTROLLER_URL = 'http://127.0.0.1:8898';
+  process.env.CHROME_CONTROLLER_API_KEY = TEST_API_KEY;
+  let sent: Record<string, unknown> | undefined;
+  global.fetch = (async (_url: unknown, init?: RequestInit) => {
+    sent = JSON.parse(String(init?.body));
+    return { ok: true, status: 200, json: async () => ({ success: true, result: {} }) } as Response;
+  }) as typeof fetch;
+  try {
+    await tools[tool].execute('call_1', params, undefined);
+  } finally {
+    global.fetch = saved.fetch;
+    if (saved.url === undefined) delete process.env.CHROME_CONTROLLER_URL; else process.env.CHROME_CONTROLLER_URL = saved.url;
+    if (saved.key === undefined) delete process.env.CHROME_CONTROLLER_API_KEY; else process.env.CHROME_CONTROLLER_API_KEY = saved.key;
+  }
+  assert.ok(sent, `${tool} sent nothing`);
+  return sent;
+}
+
+test('chrome_type_text batches run in the real worker and reach CDP', async () => {
+  const payloads = {
+    'mcp': buildTypeTextBatch({ tabId: 42, text: 'hi', instant: true }),
+    'pi': await piPayload('chrome_type_text', { tabId: 42, text: 'hi', instant: true }),
+  };
+  for (const [client, batch] of Object.entries(payloads)) {
+    const { response, cdpCalls } = await runNativeBatch(batch);
+    assert.equal(response?.error, undefined, `${client}: ${String(response?.error)}`);
+    assert.equal(response?.result.success, true, `${client}: ${JSON.stringify(response?.result)}`);
+    assert.deepEqual(cdpCalls.filter((call) => call.method === 'Input.insertText').map((call) => call.params.text), ['hi'], client);
+  }
+});
+
+test('chrome_type_text animated typing inside a batch types every character', async () => {
+  const { response, cdpCalls } = await runNativeBatch(buildTypeTextBatch({ tabId: 42, text: 'ok', typingDelayMs: 12, sound: false }));
+  assert.equal(response?.result.success, true, JSON.stringify(response?.result));
+  assert.deepEqual(cdpCalls.filter((call) => call.method === 'Input.insertText').map((call) => call.params.text), ['o', 'k']);
+});
+
+test('chrome_mouse batches run in the real worker for every mouse type', async () => {
+  const expected: Record<string, string[]> = {
+    click: ['mouseMoved', 'mousePressed', 'mouseReleased'],
+    move: ['mouseMoved'],
+    press: ['mousePressed'],
+    release: ['mouseReleased'],
+  };
+  for (const [type, events] of Object.entries(expected)) {
+    const payloads = {
+      mcp: buildMouseBatch({ tabId: 42, action: type, x: 10, y: 20 }),
+      pi: await piPayload('chrome_mouse', { tabId: 42, type, x: 10, y: 20 }),
+    };
+    for (const [client, batch] of Object.entries(payloads)) {
+      const { response, cdpCalls } = await runNativeBatch(batch);
+      const label = `${client} ${type}`;
+      assert.equal(response?.result?.success, true, `${label}: ${JSON.stringify(response)}`);
+      assert.deepEqual(
+        cdpCalls.filter((call) => call.method === 'Input.dispatchMouseEvent').map((call) => call.params.type),
+        events,
+        label,
+      );
+    }
+  }
+});
+
+/** Raw CDP a batch must refuse: other domains, the other Input methods, and
+ *  anything that only resembles an admitted method. */
+const REFUSED_BATCH_METHODS: unknown[] = [
+  'Runtime.evaluate',
+  'Page.navigate',
+  'Network.getAllCookies',
+  undefined,
+  // Siblings of the admitted methods: key events, drag data (which can carry
+  // file paths), and switching input off are all outside what the tools need.
+  'Input.dispatchKeyEvent',
+  'Input.dispatchDragEvent',
+  'Input.setIgnoreInputEvents',
+  'Input.dispatchTouchEvent',
+  ['Input.insertText'],
+  'input.insertText',
+  'Input.insertText ',
+  7,
+  { toString: 'Input.insertText' },
+];
+
+test('a batch still refuses raw CDP beyond the input methods, before touching Chrome', async () => {
+  for (const mode of ['sequential', 'parallel']) {
+    for (const method of REFUSED_BATCH_METHODS) {
+      const { response, debuggerSendCalls, chromeTouches } = await runNativeBatch({
+        mode,
+        actions: [{ action: 'ensureDebugger', tabId: 42 }, { action: 'sendCommand', tabId: 42, method }],
+      });
+      const label = `${mode} ${JSON.stringify(method)}`;
+      assert.match(String(response?.error), /Batch item 1 sends CDP method .* which batches do not allow/, label);
+      assert.equal(debuggerSendCalls(), 0, `${label}: no CDP command ran`);
+      assert.deepEqual(chromeTouches(), [], `${label}: the debugger was not attached, nor the tab grouped`);
+    }
+  }
+});
+
+test('the MCP input batches carry exactly what the tools were asked for', () => {
+  const mouse = (args: Record<string, unknown>) => buildMouseBatch({ tabId: 42, x: 10, y: 20, ...args }).actions as any[];
+  const click = mouse({ action: 'click' });
+  assert.deepEqual(click[0], { action: 'ensureDebugger', tabId: 42 });
+  assert.deepEqual(click.slice(1).map((item) => item.commandParams), [
+    { type: 'mouseMoved', x: 10, y: 20, button: 'none' },
+    { type: 'mousePressed', x: 10, y: 20, button: 'left', clickCount: 1 },
+    { type: 'mouseReleased', x: 10, y: 20, button: 'left', clickCount: 1 },
+  ]);
+  assert.ok(click.slice(1).every((item) => item.action === 'sendCommand' && item.tabId === 42 && item.method === 'Input.dispatchMouseEvent'));
+  assert.deepEqual(mouse({ type: 'press', button: 'right', clickCount: 2 })[1].commandParams, { type: 'mousePressed', x: 10, y: 20, button: 'right', clickCount: 2 });
+  assert.deepEqual(mouse({ type: 'move' })[1].commandParams, { type: 'mouseMoved', x: 10, y: 20, button: 'none' });
+  // `type` wins over the legacy `action` name, and click is the default.
+  assert.equal(mouse({ type: 'release', action: 'click' }).length, 2);
+  assert.equal(mouse({}).length, 4);
+
+  const typed = (args: Record<string, unknown>) => (buildTypeTextBatch({ tabId: 42, text: 'hi', ...args }).actions as any[])[1];
+  assert.deepEqual(typed({}), {
+    action: 'sendCommand',
+    tabId: 42,
+    method: 'Input.insertText',
+    commandParams: { text: 'hi', animateTyping: true, typingDelayMs: 50, sound: true },
+  });
+  assert.deepEqual(typed({ instant: true, typingDelayMs: 20, sound: false }).commandParams, { text: 'hi', animateTyping: false, typingDelayMs: 20, sound: false });
+  assert.equal(buildTypeTextBatch({ tabId: 42, text: 'hi' }).mode, 'sequential');
+});
+
+test('the extension and the relay admit the same CDP methods in batches', async () => {
+  const { BATCH_CDP_METHODS } = await import('./server.js');
+  const declared = backgroundSource.match(/const BATCH_CDP_METHODS = new Set\((\[[^\]]*\])\);/);
+  assert.ok(declared, 'BATCH_CDP_METHODS is declared in background.js');
+  const extensionMethods = JSON.parse(declared[1].replace(/'/g, '"')) as string[];
+  assert.deepEqual([...extensionMethods].sort(), [...BATCH_CDP_METHODS].sort());
 });

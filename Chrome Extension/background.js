@@ -633,7 +633,12 @@ const ALLOWED_BATCH_ACTIONS = new Set([
   'cleanupManagedTabs',
   'setOverlayHidden',
   'getOverlayState',
+  'sendCommand',
 ]);
+
+// Raw CDP stays out of batches except the input methods chrome_type_text and
+// chrome_mouse send. Keep in step with BATCH_CDP_METHODS in src/server.ts.
+const BATCH_CDP_METHODS = new Set(['Input.insertText', 'Input.dispatchMouseEvent']);
 
 async function runBatch(actions, options = {}) {
   if (!Array.isArray(actions)) {
@@ -651,6 +656,11 @@ async function runBatch(actions, options = {}) {
     }
     if (!ALLOWED_BATCH_ACTIONS.has(item.action)) {
       throw new Error(`Batch item ${index} specifies disallowed action "${item.action}"`);
+    }
+    if (item.action === 'sendCommand' && !BATCH_CDP_METHODS.has(item.method)) {
+      // Only a string is named: String() throws on some JSON objects.
+      const method = typeof item.method === 'string' ? item.method : `<${typeof item.method}>`;
+      throw new Error(`Batch item ${index} sends CDP method "${method}", which batches do not allow`);
     }
     const { action, ...params } = item;
     if (isProtectedTab(params.tabId)) {
