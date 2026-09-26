@@ -101,7 +101,7 @@ Relay credentials are generated per server instance, saved in a `0600` discovery
 | `captureVideo`       | `tabId`, `fps`, `duration`, `format`  | CDP screenshot sequence           |
 | `evaluateOnPage`     | `tabId`, `expression`, `awaitPromise` | `Runtime.evaluate` via CDP        |
 | `getConsoleLogs`     | `tabId`, `timeoutMs`                  | `timeoutMs` = collection window   |
-| `sendCommand`        | `tabId`, `method`, `commandParams`    | Raw CDP command                   |
+| `sendCommand`        | `tabId`, `method`, `commandParams`    | In batches: `Input.insertText`, `Input.dispatchMouseEvent` only |
 | `ensureDebugger`     | `tabId`                               | Attach debugger (idempotent)      |
 | `visualizeAction`    | `tabId`, `type`, `x`, `y`, `detail`   | HUD overlay effect                |
 | `cleanupManagedTabs` | `closeTabs`                           | Release or close AI-managed tabs  |

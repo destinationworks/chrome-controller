@@ -229,8 +229,13 @@ export async function sendCommand(
         res.on('data', (chunk: Buffer) => { body += chunk.toString(); });
         res.on('end', () => {
           try {
-            const parsed = JSON.parse(body) as { success?: boolean; result?: unknown; error?: string };
-            if (res.statusCode === 200 && parsed.success) {
+            const parsed = JSON.parse(body) as { success?: boolean; result?: unknown; error?: string; results?: unknown };
+            // The relay answers a batch with the BatchResult itself, not wrapped in
+            // `result`, and with 207 when an item failed; IPC returns the same
+            // BatchResult as its result. Either way the caller gets it whole.
+            if (action === 'batch' && (res.statusCode === 200 || res.statusCode === 207) && Array.isArray(parsed.results)) {
+              resolve(parsed);
+            } else if (res.statusCode === 200 && parsed.success) {
               resolve(parsed.result);
             } else {
               reject(new Error(parsed.error ?? `HTTP ${res.statusCode}`));
@@ -245,6 +250,52 @@ export async function sendCommand(
     req.write(data);
     req.end();
   });
+}
+
+/** The batch chrome_type_text sends: attach the debugger, then insert the text over CDP. */
+export function buildTypeTextBatch(args: Record<string, unknown>): Record<string, unknown> {
+  return {
+    mode: 'sequential',
+    actions: [
+      { action: 'ensureDebugger', tabId: args.tabId },
+      {
+        action: 'sendCommand',
+        tabId: args.tabId,
+        method: 'Input.insertText',
+        commandParams: {
+          text: args.text,
+          animateTyping: !args.instant,
+          typingDelayMs: args.typingDelayMs ?? 50,
+          sound: args.sound !== false,
+        },
+      },
+    ],
+  };
+}
+
+/** The batch chrome_mouse sends: attach the debugger, then dispatch the mouse events over CDP. */
+export function buildMouseBatch(args: Record<string, unknown>): Record<string, unknown> {
+  const mouseType = (args.type ?? args.action ?? 'click') as string;
+  const button = (args.button as string) ?? (mouseType === 'move' ? 'none' : 'left');
+  const clickCount = (args.clickCount as number) || 1;
+  const event = (commandParams: Record<string, unknown>) => ({
+    action: 'sendCommand',
+    tabId: args.tabId,
+    method: 'Input.dispatchMouseEvent',
+    commandParams,
+  });
+  const move = event({ type: 'mouseMoved', x: args.x, y: args.y, button: 'none' });
+  const press = event({ type: 'mousePressed', x: args.x, y: args.y, button, clickCount });
+  const release = event({ type: 'mouseReleased', x: args.x, y: args.y, button, clickCount });
+  const actions =
+    mouseType === 'move' ? [move] :
+    mouseType === 'press' ? [press] :
+    mouseType === 'release' ? [release] :
+    [move, press, release];
+  return {
+    mode: 'sequential',
+    actions: [{ action: 'ensureDebugger', tabId: args.tabId }, ...actions],
+  };
 }
 
 async function main(): Promise<void> {
@@ -594,60 +645,12 @@ async function main(): Promise<void> {
       }
 
       if (toolName === 'chrome_type_text') {
-        const result = await sendCommand('batch', {
-          mode: 'sequential',
-          actions: [
-            { action: 'ensureDebugger', tabId: args.tabId },
-            {
-              action: 'sendCommand',
-              tabId: args.tabId,
-              method: 'Input.insertText',
-              commandParams: {
-                text: args.text,
-                animateTyping: !args.instant,
-                typingDelayMs: args.typingDelayMs ?? 50,
-                sound: args.sound !== false,
-              },
-            },
-          ],
-        });
+        const result = await sendCommand('batch', buildTypeTextBatch(args));
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       }
 
       if (toolName === 'chrome_mouse') {
-        const mouseType = (args.type ?? args.action ?? 'click') as string;
-        const button = (args.button as string) ?? (mouseType === 'move' ? 'none' : 'left');
-        const move = {
-          action: 'sendCommand',
-          tabId: args.tabId,
-          method: 'Input.dispatchMouseEvent',
-          commandParams: { type: 'mouseMoved', x: args.x, y: args.y, button: 'none' },
-        };
-        const press = {
-          action: 'sendCommand',
-          tabId: args.tabId,
-          method: 'Input.dispatchMouseEvent',
-          commandParams: { type: 'mousePressed', x: args.x, y: args.y, button, clickCount: (args.clickCount as number) || 1 },
-        };
-        const release = {
-          action: 'sendCommand',
-          tabId: args.tabId,
-          method: 'Input.dispatchMouseEvent',
-          commandParams: { type: 'mouseReleased', x: args.x, y: args.y, button, clickCount: (args.clickCount as number) || 1 },
-        };
-        const actions =
-          mouseType === 'move' ? [move] :
-          mouseType === 'press' ? [press] :
-          mouseType === 'release' ? [release] :
-          [move, press, release];
-
-        const result = await sendCommand('batch', {
-          mode: 'sequential',
-          actions: [
-            { action: 'ensureDebugger', tabId: args.tabId },
-            ...actions,
-          ],
-        });
+        const result = await sendCommand('batch', buildMouseBatch(args));
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       }
 
