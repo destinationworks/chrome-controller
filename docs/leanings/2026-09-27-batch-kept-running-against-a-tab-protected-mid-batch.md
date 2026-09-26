@@ -1,0 +1,44 @@
+# 2026-09-27 — A batch kept running against a tab that became protected mid-batch
+
+- **Status:** Partial
+- **Task/context:** An adversarial probe of the extension worker (`Chrome Extension/background.js`, harness `createWorker` in `src/extension-background.test.ts`) checked how batches interact with protected-tab guards. A guarded secret extraction (`extractSecretGuarded` in `src/native-host.ts`) sends a sensitive `evaluateOnPage`. The worker then reserves the tab and locks all non-sensitive output until the guard expires.
+- **Unexpected observation or failure:**
+  - `runBatch` checked the allowlist and `isProtectedTab(params.tabId)` once, before any item ran.
+  - Suppose a guard landed on tab 42 while an earlier item was still awaiting. A fresh `queryTabs` was refused with "locked while a protected secret tab is active". The in-flight batch, however, still ran its remaining items against tab 42 and returned success. The probe's items were mouse events and `Input.insertText`. `evaluateOnPage` and `captureScreenshot` are also batch-allowlisted, so the same batch could read or script the protected page.
+  - Separately, a single read already in flight when the guard appeared still returned its result, and a failed one returned its error text, which can quote page content.
+- **Evidence:**
+  - Eleven regression tests fail against the unfixed worker and pass with the fix. One replays the probe exactly: after the guard, the unfixed worker still sent `mousePressed` and `Input.insertText` to tab 42. The unfixed worker evaluated `document.body.innerText` on tab 42 after the guard was stored, and relayed `synthetic-secret` from a read that finished under the guard. An unguarded control batch passes before and after the fix, so the fixture itself is sound.
+  - How a batch overlaps a guard in practice:
+    - **Native only.** The host refuses `extractSecretGuarded` while `pendingRequests.size > 0`. But `requestFromChrome` deletes the pending entry when its timeout fires, and the caller chooses that timeout (1–120000 ms). The worker keeps running the timed-out batch, and the host then admits the extraction.
+    - **Relay beside native.** The reconnect alarm can fire while the fallback socket is still `CONNECTING`, so both transports end up live. The shipped relay (`src/server.ts`) splits a batch into one WS message per item, so each item meets the worker's entry lock. A whole batch reached the worker only when `actions` was falsy and `commands` carried the list; #11 (`batchItemsOf`) has since closed that path, so over the relay only native-path batches remain exposed. Single in-flight requests are affected on this path either way.
+- **Approaches tried:**
+  - **Attempt:** Re-check only the target tab (`isProtectedTab(params.tabId)`) before each item.
+    - **Outcome:** Rejected
+    - **Why:** The worker's rule is a global lock. While any guard or guarded action is active, every non-sensitive message is refused, whatever its tab. A per-tab check would still let later items read other tabs, and it would not cover the in-flight guarded-action depth or the fail-closed "state unavailable" flag.
+  - **Attempt:** Add one `browserOutputLock()` helper, used by both handlers on entry, by the sequential loop before each item (a hit aborts the whole batch, whatever `stopOnError` says), and by both handlers again before a non-sensitive result or error is sent.
+    - **Outcome:** Partial
+    - **Why:** It fixed the probe. The adversarial test review then showed that output was withheld only if a lock was still active when the request finished. With a 1 s guard TTL, or a guard released by closing its tab, a parked read returned data it had read under the guard, and a sequential batch picked up where it had stopped.
+  - **Attempt:** Add `outputLockEpoch`, a counter bumped whenever a guarded action starts. Each request records it on entry, and `browserOutputLock(sinceEpoch)` also locks when the value has changed.
+    - **Outcome:** Worked
+    - **Why:** Overlap with a guarded action is a fact about the request's lifetime, not about the state when it finishes. Requests that start after the guard has ended see the new value and run normally, and a test covers this.
+  - **Attempt:** Gate every CDP and content-script call (21 sites), so that an action already in flight also stops acting.
+    - **Outcome:** Rejected for this change
+    - **Why:** It is invasive, and the output from those calls is already withheld. It is left as the open residual below.
+- **Root cause:** Authorization was checked once, when the request arrived, but a request runs across many awaits. The lock state it depends on can change in between, from another transport, or from the same transport once the host has stopped tracking a timed-out request.
+- **Resolution:**
+  - `browserOutputLock(sinceEpoch)` is now the single source of lock messages.
+  - The sequential batch loop re-checks it before each item.
+  - `handleWsMessage` and non-sensitive `handleNativeMessage` re-check it before any result or error leaves.
+  - `outputLockEpoch` makes overlap sticky for the life of the request.
+  - The validation-time `isProtectedTab(params.tabId)` check in `runBatch` was removed as dead code. Both entry points refuse every non-sensitive message while any guard is active, in the same synchronous turn as batch validation. The host strips `sensitive` from external requests and sends only sensitive `evaluateOnPage` and `removeTab` itself, so no sensitive batch reaches the worker.
+- **Verification:**
+  - New worker tests cover the probe's input batch, relay-beside-native, native only, parallel mode, single reads (both result and error), the depth-only lock, the unavailable-state lock (both with and without a guard remaining), guard expiry mid-flight, a guard released by closing its tab, a fresh request after expiry, and a second guarded extraction during an active guard.
+  - Thirteen targeted mutants of the fix were each killed. They include removing the loop gate, each post-send check, the epoch check, the epoch bump, the unavailable or depth reason, making either check ignore the epoch, and applying the lock to sensitive entry.
+  - `npm test`, `npm run typecheck` and `npm run lint` pass.
+  - Not verified against a live Chrome, because the installed extension is the Web Store build.
+- **Prevention/follow-up:**
+  - **Open:** an action already running when a guard appears (one request, or each item of a parallel batch) still finishes its own CDP calls against the tab. Only its output is withheld. Long-running examples are `captureVideo`, `getConsoleLogs` and animated `Input.insertText`. The fix would be a lock check inside those loops, or a gate around every page-access call.
+  - **Closed by #11:** the relay's handling of a batch with a falsy `actions` and a `commands` list (see `2026-09-27-falsy-batch-actions-skipped-the-relay-gate-and-the-allowlists-drifted.md`).
+  - The worker only honours `sensitive` because the host strips it from external requests. If the host ever sends another sensitive action, especially `batch`, re-add a worker-side check.
+- **Reusable learning:** Authorize a long-running request at every point where it acts or answers, not only when it arrives. Record the lock state the request started under, so that a lock appearing and clearing during the request still counts.
+- **References:** `Chrome Extension/background.js` (`browserOutputLock`, `outputLockEpoch`, `runBatch`, `handleWsMessage`, `handleNativeMessage`), `src/extension-background.test.ts`, `src/native-host.ts` (`requestFromChrome`, `extractSecretGuarded`), `src/server.ts` (`runBatch`), `README.md` (Secure Clipboard Output Guards).
