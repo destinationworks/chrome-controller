@@ -252,7 +252,10 @@ test('chrome_batch sends raw actions payload', async () => {
     undefined
   );
 
-  const p = sentPayload as { mode: string; actions: unknown[] };
+  const p = sentPayload as { action: string; mode: string; actions: unknown[] };
+  // The relay treats any body with an `actions` array as a batch, so it never
+  // needed `action`; the native host forwards `action` to Chrome verbatim.
+  assert.equal(p.action, 'batch');
   assert.equal(p.mode, 'parallel');
   assert.equal(p.actions.length, 2);
 
@@ -691,7 +694,8 @@ test('chrome_batch with sequential mode', async () => {
   };
 
   await pi.tools['chrome_batch'].execute('call_1', { mode: 'sequential', actions: [{ action: 'queryTabs' }] }, undefined);
-  const p = sentPayload as { mode: string; stopOnError: unknown };
+  const p = sentPayload as { action: string; mode: string; stopOnError: unknown };
+  assert.equal(p.action, 'batch');
   assert.equal(p.mode, 'sequential');
 
   global.fetch = originalFetch;
