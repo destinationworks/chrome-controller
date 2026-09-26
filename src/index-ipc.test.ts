@@ -554,3 +554,30 @@ test('an invalid ipcTimeoutMs is rejected when the extension loads', () => {
   }
   assert.doesNotThrow(() => chromeControllerPiExtension(pi, { ipcTimeoutMs: 2 ** 31 - 1 }));
 });
+
+// ── Payload contract with the host ───────────────────────────────────────────
+
+test('chrome_batch names the batch action, which the host forwards to Chrome verbatim', async () => {
+  // Stands in for the host + extension: an absent `action` reaches Chrome as
+  // `Unknown action: undefined`. The relay alone treats any `actions` array as a batch.
+  const host = await startFakeHost((req, socket) => {
+    const answer = req.action === 'batch'
+      ? { success: true, result: { mode: req.mode, results: [], success: true } }
+      : { success: false, error: `Error: Unknown action: ${String(req.action)}` };
+    socket.write(JSON.stringify(answer) + '\n');
+  });
+  const tools = loadTools();
+  try {
+    const result = parsed(await tools['chrome_batch'].execute(
+      'c1', { mode: 'sequential', stopOnError: true, actions: [{ action: 'queryTabs' }] }, undefined,
+    ));
+    assert.deepEqual(host.requests, [
+      { action: 'batch', mode: 'sequential', stopOnError: true, actions: [{ action: 'queryTabs' }] },
+    ]);
+    assert.equal(result.success, true);
+    assert.equal(result.error, undefined);
+    assert.deepEqual(relayCalls, []);
+  } finally {
+    await host.close();
+  }
+});

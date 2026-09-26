@@ -515,6 +515,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI, options: C
       return textResult(
         await request(
           {
+            action: 'batch',
             mode: params.mode ?? 'parallel',
             stopOnError: params.stopOnError,
             actions: params.actions,
