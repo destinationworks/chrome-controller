@@ -624,22 +624,38 @@ const ALLOWED_BATCH_ACTIONS = new Set([
   'detachDebugger',
   'visualizeAction',
   'evaluateOnPage',
-  'clickElement',
-  'typeText',
-  'navigate',
-  'click',
-  'type',
   'getConsoleLogs',
   'cleanupManagedTabs',
   'setOverlayHidden',
   'getOverlayState',
 ]);
 
-async function runBatch(actions, options = {}) {
-  if (!Array.isArray(actions)) {
-    throw new Error('Batch action requires actions array');
+// Same rule as batchItemsOf in src/server.ts. A body is a batch when its
+// action is "batch", or when it names no action and carries actions or
+// commands. Its items come from exactly one of those keys, which must hold the
+// array. Any other action carrying either key is refused.
+function batchItemsOf(action, params) {
+  const hasActions = params.actions !== undefined;
+  const hasCommands = params.commands !== undefined;
+  if (action !== undefined && action !== 'batch') {
+    if (hasActions || hasCommands) throw new Error('Only a batch can carry actions or commands');
+    return undefined;
   }
+  if (!hasActions && !hasCommands) {
+    if (action === 'batch') throw new Error('Batch payload must include an actions array');
+    return undefined;
+  }
+  if (hasActions && hasCommands) {
+    throw new Error('Batch payload must use either actions or commands, not both');
+  }
+  const items = hasActions ? params.actions : params.commands;
+  if (!Array.isArray(items)) {
+    throw new Error('Batch payload must include an actions array');
+  }
+  return items;
+}
 
+async function runBatch(actions, options = {}) {
   const mode = options.mode === 'sequential' ? 'sequential' : 'parallel';
   const stopOnError = options.stopOnError !== false;
   const normalized = actions.map((item, index) => {
@@ -690,6 +706,9 @@ async function runBatch(actions, options = {}) {
 }
 
 async function executeAction(action, params = {}) {
+  const batchItems = batchItemsOf(action, params);
+  if (batchItems) return runBatch(batchItems, params);
+
   let result = null;
 
   if (action === 'createTab') {
@@ -910,8 +929,6 @@ async function executeAction(action, params = {}) {
     result = { success: true, hidden: overlayHidden };
   } else if (action === 'getOverlayState') {
     result = { success: true, overlayHidden, controlledTabId };
-  } else if (action === 'batch') {
-    result = await runBatch(params.actions || params.commands, params);
   } else {
     throw new Error(`Unknown action: ${action}`);
   }

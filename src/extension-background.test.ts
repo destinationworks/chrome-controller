@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
+import chromeControllerPiExtension from './index.ts';
 
 const TEST_API_KEY = 'test-key-0123456789abcdef01234567';
 const backgroundPath = path.join(
@@ -167,6 +168,7 @@ function createWorker(
   return {
     alarmEvent,
     alarmState,
+    context,
     debuggerOnEvent,
     debuggerSendCalls: () => debuggerSendCalls,
     nativeMessages,
@@ -463,4 +465,151 @@ test('relay rotation invalidates the old transport before connecting with the ne
   const rotatedUrl = new URL(worker.sockets[1].url);
   assert.equal(rotatedUrl.port, '43113');
   assert.equal(rotatedUrl.searchParams.get('key'), rotatedKey);
+});
+
+// ── Batch allowlist and payload contract ───────────────────────────────────
+
+/** The batch allowlist as the running worker holds it. */
+function extensionBatchActions(): string[] {
+  const worker = createWorker(new Map());
+  return Array.from(vm.runInContext('ALLOWED_BATCH_ACTIONS', worker.context) as Iterable<string>);
+}
+
+async function runNative(message: Record<string, unknown>) {
+  const worker = createWorker(new Map());
+  await flushWorkerTasks();
+  await worker.nativeOnMessage.emit({ id: 1, ...message });
+  const response = worker.nativeMessages.find((m) => m.id === 1) as Record<string, any>;
+  return { response, queryTabsCalls: worker.queryTabsCalls };
+}
+
+async function runNativeBatch(batch: Record<string, unknown>) {
+  return (await runNative({ action: 'batch', ...batch })).response;
+}
+
+/** Captures the body a pi tool sends; the IPC and relay paths send the same one. */
+async function piRequestBody(tool: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const tools: Record<string, { execute: (...args: unknown[]) => Promise<unknown> }> = {};
+  chromeControllerPiExtension({ registerTool: (t: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) => { tools[t.name] = t; } } as never);
+  const saved = { url: process.env.CHROME_CONTROLLER_URL, key: process.env.CHROME_CONTROLLER_API_KEY, fetch: global.fetch };
+  process.env.CHROME_CONTROLLER_URL = 'http://127.0.0.1:8898';
+  process.env.CHROME_CONTROLLER_API_KEY = TEST_API_KEY;
+  let sent: Record<string, unknown> | undefined;
+  global.fetch = (async (_url: unknown, init?: RequestInit) => {
+    sent = JSON.parse(String(init?.body));
+    return { ok: true, status: 200, json: async () => ({ success: true, result: {} }) } as Response;
+  }) as typeof fetch;
+  try {
+    await tools[tool].execute('call_1', params, undefined);
+  } finally {
+    global.fetch = saved.fetch;
+    if (saved.url === undefined) delete process.env.CHROME_CONTROLLER_URL; else process.env.CHROME_CONTROLLER_URL = saved.url;
+    if (saved.key === undefined) delete process.env.CHROME_CONTROLLER_API_KEY; else process.env.CHROME_CONTROLLER_API_KEY = saved.key;
+  }
+  assert.ok(sent, `${tool} sent nothing`);
+  return sent;
+}
+
+test('the extension and the relay admit the same batch actions', async () => {
+  const { ALLOWED_BATCH_ACTIONS } = await import('./server.js');
+  // No intended differences: an action one side admits and the other refuses
+  // makes a batch's fate depend on the transport it took.
+  assert.deepEqual(extensionBatchActions().sort(), [...ALLOWED_BATCH_ACTIONS].sort());
+});
+
+test('actions kept out of batches stay out, and the gate refuses them', async () => {
+  // Each has a handler in the worker, so only the allowlist keeps it out.
+  for (const action of ['batch', 'createWindow', 'screenshot']) {
+    assert.ok(!extensionBatchActions().includes(action), action);
+    const response = await runNativeBatch({ actions: [{ action: 'queryTabs' }, { action, tabId: 42, actions: [] }] });
+    assert.match(String(response?.error), /Batch item 1 (specifies disallowed action|cannot be a nested batch)/, action);
+  }
+});
+
+test('every batch-allowlisted action has a handler in the real worker', async () => {
+  const actions = extensionBatchActions();
+  assert.ok(actions.length > 0);
+  for (const action of actions) {
+    // Short timings keep getConsoleLogs and captureVideo from waiting.
+    const response = await runNativeBatch({
+      mode: 'sequential',
+      actions: [{ action, tabId: 42, timeoutMs: 1, fps: 1, duration: 1 }],
+    });
+    assert.equal(response?.error, undefined, `${action}: ${String(response?.error)}`);
+    const [item] = response.result.results;
+    assert.equal(item.action, action);
+    assert.doesNotMatch(String(item.error ?? ''), /Unknown action/, action);
+  }
+});
+
+test('an unhandled action name is refused by the batch gate, not reported as unknown', async () => {
+  for (const action of ['clickElement', 'typeText', 'navigate', 'click', 'type']) {
+    const response = await runNativeBatch({ actions: [{ action, tabId: 42 }] });
+    assert.match(String(response?.error), new RegExp(`disallowed action "${action}"`), action);
+  }
+});
+
+test('overlay actions work as batch items', async () => {
+  const response = await runNativeBatch({
+    mode: 'sequential',
+    actions: [{ action: 'setOverlayHidden', hidden: true }, { action: 'getOverlayState' }],
+  });
+  assert.equal(response?.result?.success, true, JSON.stringify(response));
+  assert.equal(response.result.results[1].result.overlayHidden, true);
+});
+
+test('a native batch honours mode and stopOnError', async () => {
+  // visualizeAction without a tabId fails in the worker.
+  const items = [{ action: 'visualizeAction' }, { action: 'queryTabs' }];
+  const stopped = await runNativeBatch({ mode: 'sequential', commands: items });
+  assert.equal(stopped.result.mode, 'sequential');
+  assert.deepEqual(stopped.result.results.map((r: { success: boolean }) => r.success), [false]);
+  const continued = await runNativeBatch({ mode: 'sequential', stopOnError: false, commands: items });
+  assert.deepEqual(continued.result.results.map((r: { success: boolean }) => r.success), [false, true]);
+  const parallel = await runNativeBatch({ commands: items });
+  assert.equal(parallel.result.mode, 'parallel');
+  assert.deepEqual(parallel.result.results.map((r: { success: boolean }) => r.success), [false, true]);
+});
+
+test('a native batch takes its items from exactly one array under actions or commands', async () => {
+  for (const key of ['actions', 'commands']) {
+    const response = await runNativeBatch({ [key]: [{ action: 'queryTabs' }] });
+    assert.equal(response?.result?.success, true, `${key}: ${JSON.stringify(response)}`);
+  }
+  for (const actions of [false, 0, '', null]) {
+    const withCommands = await runNativeBatch({ actions, commands: [{ action: 'queryTabs' }] });
+    assert.match(String(withCommands?.error), /either actions or commands/, JSON.stringify(actions));
+    const alone = await runNativeBatch({ actions });
+    assert.match(String(alone?.error), /actions array/, JSON.stringify(actions));
+  }
+  const both = await runNativeBatch({ actions: [{ action: 'queryTabs' }], commands: [{ action: 'queryTabs' }] });
+  assert.match(String(both?.error), /either actions or commands/);
+  assert.match(String((await runNativeBatch({}))?.error), /actions array/);
+});
+
+test('the worker decides what is a batch the same way the relay does', async () => {
+  // No action plus an item list is a batch, as on the relay.
+  for (const key of ['actions', 'commands']) {
+    const { response, queryTabsCalls } = await runNative({ [key]: [{ action: 'queryTabs' }] });
+    assert.equal(response?.result?.success, true, `${key}: ${JSON.stringify(response)}`);
+    assert.equal(queryTabsCalls(), 1, key);
+  }
+  // Any other action carrying an item list is refused before it runs.
+  for (const key of ['actions', 'commands']) {
+    const { response, queryTabsCalls } = await runNative({ action: 'queryTabs', [key]: [{ action: 'queryTabs' }] });
+    assert.match(String(response?.error), /Only a batch can carry/, key);
+    assert.equal(queryTabsCalls(), 0, key);
+  }
+  const nested = await runNativeBatch({ actions: [{ action: 'queryTabs', commands: [{ action: 'queryTabs' }] }] });
+  assert.match(String(nested.result.results[0].error), /Only a batch can carry/);
+});
+
+test('pi chrome_batch runs in the real worker', async () => {
+  const body = await piRequestBody('chrome_batch', { mode: 'sequential', actions: [{ action: 'queryTabs' }] });
+  // The worker in users' browsers predates the rule above and runs a body as a
+  // batch only when it names action "batch".
+  assert.equal(body.action, 'batch');
+  const { response, queryTabsCalls } = await runNative(body);
+  assert.equal(response?.result?.success, true, JSON.stringify(response));
+  assert.equal(queryTabsCalls(), 1);
 });

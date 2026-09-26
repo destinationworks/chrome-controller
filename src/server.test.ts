@@ -101,15 +101,15 @@ function connectMockExtension(server: { wsPort: number }): Promise<WebSocket> {
         const id = msg.id;
         if (msg.action === 'queryTabs') {
           ws.send(JSON.stringify({ id, result: { tabs: [{ id: 1, title: 'Mock Tab' }] } }));
-        } else if (msg.action === 'navigate') {
+        } else if (msg.action === 'updateTab') {
           ws.send(JSON.stringify({ id, result: { success: true, url: msg.url || '' } }));
-        } else if (msg.action === 'click') {
+        } else if (msg.action === 'clickSelector') {
           if (msg.selector === '#fail') {
             ws.send(JSON.stringify({ id, error: 'Element not found' }));
           } else {
             ws.send(JSON.stringify({ id, result: { success: true } }));
           }
-        } else if (msg.action === 'type') {
+        } else if (msg.action === 'fillSelector') {
           ws.send(JSON.stringify({ id, result: { success: true } }));
         } else {
           ws.send(JSON.stringify({ id, error: `Action failed in extension: ${msg.action}` }));
@@ -325,7 +325,7 @@ test.describe('Server - Batch Mode', () => {
       action: 'batch',
       commands: [
         { action: 'queryTabs', queryInfo: {} },
-        { action: 'navigate', url: 'https://example.com' },
+        { action: 'updateTab', tabId: 1, url: 'https://example.com' },
       ],
     });
     assert.equal(res.status, 200);
@@ -349,7 +349,7 @@ test.describe('Server - Batch Mode', () => {
       action: 'batch',
       commands: [
         { action: 'queryTabs', queryInfo: {} },
-        { action: 'click', selector: '#fail' },
+        { action: 'clickSelector', selector: '#fail' },
       ],
     });
     assert.equal(res.status, 207);
@@ -543,7 +543,7 @@ test.describe('Server - Extension Error Passthrough', () => {
     assert.equal(res.status, 200);
     assert.equal(res.body.success, true);
 
-    const res2 = await post(server, { action: 'click', selector: '#fail' });
+    const res2 = await post(server, { action: 'clickSelector', selector: '#fail' });
     assert.equal(res2.status, 400);
     assert.ok(res2.body.error);
 
@@ -565,7 +565,7 @@ test.describe('Server - Batch with actions array', () => {
       action: 'batch',
       commands: [
         { action: 'queryTabs', queryInfo: {} },
-        { action: 'click', selector: '#btn' },
+        { action: 'clickSelector', selector: '#btn' },
       ],
     });
     assert.equal(res.status, 200);
@@ -608,6 +608,139 @@ test.describe('Server - Batch with actions array', () => {
     const res = await post(server, { action: 'batch', commands: tooMany });
     assert.equal(res.status, 400);
     assert.ok(res.body.error);
+  });
+
+  test.it('closes gracefully', () => {
+    ext.close();
+    server.close();
+  });
+});
+
+// A body is a batch when its action is "batch", or when it names no action and
+// carries `actions` or `commands`. Its items come from exactly one of those keys,
+// which must hold the array. A body that fails this is refused, never forwarded
+// to the extension whole.
+test.describe('Server - Batch payload contract', () => {
+  let server: ChromeControllerServer;
+  let ext: WebSocket;
+  const received: Record<string, unknown>[] = [];
+  // Items the relay's own gate must refuse, and more of them than MAX_BATCH.
+  // createWindow has a handler in the extension but is kept out of batches.
+  const gated = [
+    { action: 'createWindow', url: 'https://example.com', incognito: true },
+    ...Array(60).fill({ action: 'queryTabs' }),
+  ];
+
+  async function assertRefusedUnforwarded(body: Record<string, unknown>, error: RegExp) {
+    received.length = 0;
+    const res = await post(server, body);
+    const label = JSON.stringify({ ...body, commands: body.commands && '…' });
+    assert.equal(res.status, 400, `${label}: ${JSON.stringify(res.body)}`);
+    assert.match(String(res.body.error), error, label);
+    await delay(20);
+    assert.deepEqual(received, [], `${label}: nothing reached the extension`);
+  }
+
+  test.it('starts a relay with a recording extension', async () => {
+    server = await createServer();
+    ext = await new Promise<WebSocket>((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${server.wsPort}?key=${TEST_API_KEY}`);
+      ws.on('error', reject);
+      ws.on('message', (data: Buffer | string) => {
+        const msg = JSON.parse(data.toString());
+        received.push(msg);
+        if (msg.action === 'visualizeAction') ws.send(JSON.stringify({ id: msg.id, error: 'tabId is required' }));
+        else ws.send(JSON.stringify({ id: msg.id, result: { ok: msg.action } }));
+      });
+      ws.on('open', () => resolve(ws));
+    });
+  });
+
+  test.it('refuses a falsy actions value instead of forwarding the commands unchecked', async () => {
+    for (const actions of [false, 0, '', null]) {
+      await assertRefusedUnforwarded({ action: 'batch', actions, commands: gated }, /either actions or commands/);
+      await assertRefusedUnforwarded({ action: 'batch', actions }, /actions array/);
+      await assertRefusedUnforwarded({ actions }, /actions array/);
+    }
+  });
+
+  test.it('refuses a falsy actions value even when the commands are allowed', async () => {
+    for (const actions of [false, 0, '', null]) {
+      await assertRefusedUnforwarded({ action: 'batch', actions, commands: [{ action: 'queryTabs' }] }, /either actions or commands/);
+    }
+  });
+
+  test.it('refuses a truthy non-array actions or commands value', async () => {
+    for (const items of [true, 1, 'queryTabs', { 0: { action: 'queryTabs' }, length: 1 }]) {
+      await assertRefusedUnforwarded({ action: 'batch', actions: items }, /actions array/);
+      await assertRefusedUnforwarded({ action: 'batch', commands: items }, /actions array/);
+      await assertRefusedUnforwarded({ actions: items }, /actions array/);
+    }
+  });
+
+  test.it('refuses a batch with no item list', async () => {
+    await assertRefusedUnforwarded({ action: 'batch' }, /actions array/);
+    await assertRefusedUnforwarded({ action: 'batch', mode: 'sequential', stopOnError: false }, /actions array/);
+  });
+
+  test.it('refuses a body carrying both actions and commands', async () => {
+    const queryTabs = [{ action: 'queryTabs' }];
+    await assertRefusedUnforwarded({ action: 'batch', actions: queryTabs, commands: queryTabs }, /either actions or commands/);
+    await assertRefusedUnforwarded({ action: 'batch', actions: queryTabs, commands: false }, /either actions or commands/);
+    await assertRefusedUnforwarded({ actions: queryTabs, commands: queryTabs }, /either actions or commands/);
+  });
+
+  test.it('still gates and bounds items sent under either key', async () => {
+    for (const key of ['actions', 'commands']) {
+      await assertRefusedUnforwarded({ action: 'batch', [key]: gated.slice(0, 1) }, /disallowed action "createWindow"/);
+      await assertRefusedUnforwarded({ action: 'batch', [key]: gated.slice(1) }, /more than 50 actions/);
+    }
+    await assertRefusedUnforwarded({ actions: gated.slice(0, 1) }, /disallowed action "createWindow"/);
+    await assertRefusedUnforwarded({ commands: gated.slice(0, 1) }, /disallowed action "createWindow"/);
+  });
+
+  test.it('refuses a non-batch action carrying actions or commands', async () => {
+    for (const key of ['actions', 'commands']) {
+      for (const items of [[{ action: 'queryTabs' }], gated, false]) {
+        await assertRefusedUnforwarded({ action: 'queryTabs', [key]: items }, /Only a batch can carry/);
+      }
+    }
+    await assertRefusedUnforwarded({ action: null, actions: [{ action: 'queryTabs' }] }, /Only a batch can carry/);
+  });
+
+  test.it('honours mode and stopOnError', async () => {
+    const items = [{ action: 'visualizeAction' }, { action: 'queryTabs' }];
+    const cases: Array<[Record<string, unknown>, string, string[]]> = [
+      [{ mode: 'sequential' }, 'sequential', ['visualizeAction']],
+      [{ mode: 'sequential', stopOnError: false }, 'sequential', ['visualizeAction', 'queryTabs']],
+      [{}, 'parallel', ['queryTabs', 'visualizeAction']],
+    ];
+    for (const [options, mode, sent] of cases) {
+      received.length = 0;
+      const res = await post(server, { action: 'batch', commands: items, ...options });
+      const label = JSON.stringify(options);
+      assert.equal(res.status, 207, label);
+      assert.equal(res.body.mode, mode, label);
+      assert.deepEqual(res.body.results.map((r: { success: boolean }) => r.success), [false, true].slice(0, sent.length), label);
+      assert.deepEqual(received.map((msg) => msg.action).sort(), [...sent].sort(), label);
+    }
+  });
+
+  test.it('runs a valid batch from actions or commands, with or without action "batch", item by item', async () => {
+    const items = [{ action: 'queryTabs' }, { action: 'setOverlayHidden', hidden: true }, { action: 'getOverlayState' }];
+    for (const body of [
+      { action: 'batch', actions: items },
+      { action: 'batch', commands: items },
+      { actions: items },
+      { commands: items },
+    ]) {
+      received.length = 0;
+      const res = await post(server, body);
+      assert.equal(res.status, 200, JSON.stringify(res.body));
+      assert.deepEqual(res.body.results.map((r: { result: unknown }) => r.result), items.map((item) => ({ ok: item.action })));
+      assert.deepEqual(received.map((msg) => msg.action).sort(), ['getOverlayState', 'queryTabs', 'setOverlayHidden']);
+      assert.equal(received.find((msg) => msg.action === 'setOverlayHidden')?.hidden, true);
+    }
   });
 
   test.it('closes gracefully', () => {

@@ -383,6 +383,22 @@ test('host answers are returned as-is, including success:false, without using th
   }
 });
 
+test('chrome_batch names action "batch" over IPC, which the extension needs to run it as one', async () => {
+  const host = await startFakeHost((_req, socket) => {
+    socket.write(JSON.stringify({ success: true, result: { mode: 'sequential', results: [], success: true } }) + '\n');
+  });
+  const tools = loadTools();
+  try {
+    await tools['chrome_batch'].execute('c1', { mode: 'sequential', actions: [{ action: 'queryTabs' }] }, undefined);
+    assert.equal(host.requests.length, 1);
+    const { id: _id, ...request } = host.requests[0];
+    assert.deepEqual(request, { action: 'batch', mode: 'sequential', actions: [{ action: 'queryTabs' }] });
+    assert.deepEqual(relayCalls, []);
+  } finally {
+    await host.close();
+  }
+});
+
 test('a multi-byte character split across two reads is decoded intact', async () => {
   const title = 'Привет 🌍 世界';
   const host = await startFakeHost((_req, socket) => {

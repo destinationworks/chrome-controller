@@ -110,14 +110,38 @@ export const ALLOWED_BATCH_ACTIONS = new Set([
   'detachDebugger',
   'visualizeAction',
   'evaluateOnPage',
-  'clickElement',
-  'typeText',
-  'navigate',
-  'click',
-  'type',
   'getConsoleLogs',
   'cleanupManagedTabs',
+  'setOverlayHidden',
+  'getOverlayState',
 ]);
+
+/**
+ * The items of a batch body, or undefined when the body is a single command.
+ *
+ * A body is a batch when its action is "batch", or when it names no action and
+ * carries `actions` or `commands`. Its items come from exactly one of those
+ * keys, which must hold the array. Any other action carrying either key is
+ * refused. The extension applies the same rule (`batchItemsOf` in
+ * background.js), and the relay never forwards a batch whole, so no body can
+ * skip the allowlist or the size limit.
+ */
+function batchItemsOf(command: Record<string, unknown>): unknown[] | undefined {
+  const hasActions = command.actions !== undefined;
+  const hasCommands = command.commands !== undefined;
+  if (command.action !== undefined && command.action !== 'batch') {
+    if (hasActions || hasCommands) throw new Error('Only a batch can carry actions or commands');
+    return undefined;
+  }
+  if (!hasActions && !hasCommands) {
+    if (command.action === 'batch') throw new Error('Batch payload must include an actions array');
+    return undefined;
+  }
+  if (hasActions && hasCommands) throw new Error('Batch payload must use either actions or commands, not both');
+  const items = hasActions ? command.actions : command.commands;
+  if (!Array.isArray(items)) throw new Error('Batch payload must include an actions array');
+  return items;
+}
 
 function isLoopbackAddress(addr?: string): boolean {
   if (!addr) return false;
@@ -355,7 +379,6 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
   }
 
   async function runBatch(actions: unknown[], options: BatchOptions = {}): Promise<BatchResult> {
-    if (!Array.isArray(actions)) throw new Error('Batch payload must include an actions array');
     if (actions.length === 0) throw new Error('Batch actions array cannot be empty');
     if (actions.length > MAX_BATCH) throw new Error(`Batch cannot contain more than ${MAX_BATCH} actions`);
 
@@ -461,8 +484,7 @@ export function createChromeControllerServer(config: ServerConfig = {}): ChromeC
 
       try {
         const command = await readJsonBody(req);
-        const actions = (command.actions as unknown[] | undefined) ??
-          (command.action === 'batch' ? (command.commands as unknown[] | undefined) : null);
+        const actions = batchItemsOf(command);
 
         if (actions) {
           console.log(`Received HTTP batch: ${actions.length} action(s), mode=${command.mode ?? 'parallel'}`);
