@@ -35,6 +35,7 @@ function eventHook() {
     async emit(...args: unknown[]) {
       await Promise.all(listeners.map((listener) => listener(...args)));
     },
+    clear() { listeners.length = 0; },
   };
 }
 
@@ -64,6 +65,7 @@ function createWorker(
   let removeTabCalls = 0;
   let debuggerSendCalls = 0;
   const chromeTouches: string[] = [];
+  let nativeConnects = 0;
   let storageWritesFailing = false;
 
   const nativePort = {
@@ -109,7 +111,13 @@ function createWorker(
       id: 'a'.repeat(32),
       lastError: undefined,
       onMessage: eventHook(),
-      connectNative: () => nativePort,
+      // Each connect is a fresh port: the previous port's listeners are gone.
+      connectNative: () => {
+        nativeConnects += 1;
+        nativeOnMessage.clear();
+        nativeOnDisconnect.clear();
+        return nativePort;
+      },
     },
     storage: {
       session: {
@@ -187,6 +195,7 @@ function createWorker(
     debuggerOnEvent,
     debuggerSendCalls: () => debuggerSendCalls,
     chromeTouches: () => [...chromeTouches],
+    nativeConnects: () => nativeConnects,
     nativeMessages,
     nativeOnDisconnect,
     nativeOnMessage,
@@ -195,6 +204,7 @@ function createWorker(
     removeTabCalls: () => removeTabCalls,
     setStorageWritesFailing(value: boolean) { storageWritesFailing = value; },
     sockets: WebSocketMock.instances,
+    tabRemoved,
   };
 }
 
@@ -946,4 +956,381 @@ test('pi chrome_batch runs in the real worker', async () => {
   const { response, queryTabsCalls } = await runNative(body);
   assert.equal(response?.result?.success, true, JSON.stringify(response));
   assert.equal(queryTabsCalls(), 1);
+});
+
+// A CDP stub that records every command and holds any command whose expression
+// (or input event type) was passed to hold(), so a guard can land while it waits.
+function cdpRecorder() {
+  const calls: { method: string; params: Record<string, unknown> }[] = [];
+  const held = new Map<string, PromiseWithResolvers<unknown>>();
+  return {
+    calls,
+    hold(expression: string) {
+      const gate = Promise.withResolvers<unknown>();
+      held.set(expression, gate);
+      return gate;
+    },
+    send(_target: unknown, method: string, params?: unknown) {
+      const commandParams = (params ?? {}) as Record<string, unknown>;
+      calls.push({ method, params: commandParams });
+      const gate = held.get(String(commandParams.expression ?? commandParams.type));
+      if (gate) return gate.promise;
+      return Promise.resolve({ result: { value: `page:${String(commandParams.expression ?? method)}` } });
+    },
+    evaluated() {
+      return calls.filter((call) => call.method === 'Runtime.evaluate').map((call) => call.params.expression);
+    },
+    screenshots() {
+      return calls.filter((call) => call.method === 'Page.captureScreenshot').length;
+    },
+  };
+}
+
+// Both transports live at once: the native host drops, the worker falls back to
+// the relay, and the reconnect alarm fires while that socket is still connecting,
+// so the native port comes back too.
+async function openRelayBesideNative(worker: ReturnType<typeof createWorker>) {
+  await worker.nativeOnMessage.emit({
+    event: 'relayConfig',
+    relay: { instance: 'default', wsPort: 43112, apiKey: TEST_API_KEY, pid: 1, startedAt: new Date().toISOString() },
+  });
+  await worker.nativeOnDisconnect.emit();
+  await flushWorkerTasks();
+  const socket = worker.sockets.at(-1)!;
+  await worker.alarmEvent.emit({ name: 'reconnect' });
+  assert.equal(worker.nativeConnects(), 2);
+  socket.open();
+  return socket;
+}
+
+function relayReply(socket: ReturnType<typeof createWorker>['sockets'][number], id: number) {
+  return socket.sent.map((message) => JSON.parse(message)).find((message) => message.id === id);
+}
+
+// Park on a slow read, then read the tab once a guarded extraction has made it
+// protected. Natively this reaches the worker whole after the host's request
+// timeout has dropped it; the relay splits batches into items, and forwards one
+// whole only when `actions` is falsy and `commands` carries the list.
+const raceBatch = [
+  { action: 'ensureDebugger', tabId: 42 },
+  { action: 'evaluateOnPage', tabId: 42, expression: 'slow-read' },
+  { action: 'evaluateOnPage', tabId: 42, expression: 'document.body.innerText' },
+  { action: 'captureScreenshot', tabId: 42 },
+];
+
+const guardedExtraction = {
+  action: 'evaluateOnPage',
+  tabId: 42,
+  expression: 'guarded-extraction',
+  sensitive: true,
+  guardTtlSeconds: 300,
+};
+
+test('control: an unguarded sequential relay batch runs every item and returns its results', async () => {
+  const cdp = cdpRecorder();
+  const worker = createWorker(new Map(), { debuggerSendCommand: cdp.send });
+  await flushWorkerTasks();
+  const socket = await openRelayBesideNative(worker);
+
+  await socket.onmessage?.({
+    data: JSON.stringify({ id: 50, action: 'batch', mode: 'sequential', stopOnError: false, actions: raceBatch }),
+  });
+
+  const reply = relayReply(socket, 50);
+  assert.equal(reply?.error, undefined);
+  assert.equal(reply?.result.success, true);
+  assert.deepEqual(reply?.result.results.map((item: { action: string }) => item.action), raceBatch.map((item) => item.action));
+  assert.deepEqual(cdp.evaluated(), ['slow-read', 'document.body.innerText']);
+  assert.equal(cdp.screenshots(), 1);
+});
+
+test('a relay batch stops before its next item once a guarded extraction protects the tab mid-batch', async () => {
+  const cdp = cdpRecorder();
+  const slowRead = cdp.hold('slow-read');
+  const worker = createWorker(new Map(), { debuggerSendCommand: cdp.send });
+  await flushWorkerTasks();
+  const socket = await openRelayBesideNative(worker);
+
+  // stopOnError: false proves the abort does not depend on the caller's error policy.
+  const batch = socket.onmessage?.({
+    data: JSON.stringify({ id: 51, action: 'batch', mode: 'sequential', stopOnError: false, actions: raceBatch }),
+  });
+  await flushWorkerTasks();
+  assert.deepEqual(cdp.evaluated(), ['slow-read']);
+
+  await worker.nativeOnMessage.emit({ id: 52, ...guardedExtraction });
+  assert.equal(worker.nativeMessages.find((message) => message.id === 52)?.error, undefined);
+  await socket.onmessage?.({ data: JSON.stringify({ id: 53, action: 'queryTabs' }) });
+  assert.match(String(relayReply(socket, 53)?.error), /protected secret tab/);
+
+  slowRead.resolve({ result: { value: 'synthetic-secret' } });
+  await batch;
+
+  assert.deepEqual(cdp.evaluated(), ['slow-read', 'guarded-extraction'], 'a batch item ran against the protected tab');
+  assert.equal(cdp.screenshots(), 0, 'the protected tab was screenshotted');
+  const reply = relayReply(socket, 51);
+  assert.equal(reply?.error, 'Browser output is locked while a protected secret tab is active');
+  assert.equal(reply?.result, undefined);
+  assert.doesNotMatch(socket.sent.join('\n'), /synthetic-secret/);
+});
+
+test('the probe: a relay input batch sends no input to a tab protected mid-batch', async () => {
+  const cdp = cdpRecorder();
+  const mouseMoved = cdp.hold('mouseMoved');
+  const worker = createWorker(new Map(), { debuggerSendCommand: cdp.send });
+  await flushWorkerTasks();
+  const socket = await openRelayBesideNative(worker);
+  const mouse = (type: string) => ({
+    action: 'sendCommand',
+    tabId: 42,
+    method: 'Input.dispatchMouseEvent',
+    commandParams: { type, x: 10, y: 10, button: 'left', clickCount: 1 },
+  });
+
+  const batch = socket.onmessage?.({
+    data: JSON.stringify({
+      id: 80,
+      action: 'batch',
+      mode: 'sequential',
+      actions: [
+        { action: 'ensureDebugger', tabId: 42 },
+        mouse('mouseMoved'),
+        mouse('mousePressed'),
+        { action: 'sendCommand', tabId: 42, method: 'Input.insertText', commandParams: { text: 'attacker' } },
+      ],
+    }),
+  });
+  await flushWorkerTasks();
+  await worker.nativeOnMessage.emit({ id: 81, ...guardedExtraction });
+  mouseMoved.resolve({});
+  await batch;
+
+  const input = cdp.calls.filter((call) => call.method.startsWith('Input.'));
+  assert.deepEqual(input.map((call) => call.params.type), ['mouseMoved'], 'input reached the protected tab');
+  assert.equal(relayReply(socket, 80)?.error, 'Browser output is locked while a protected secret tab is active');
+});
+
+test('a native batch stops mid-batch too: the worker does not rely on the host serializing requests', async () => {
+  const cdp = cdpRecorder();
+  const slowRead = cdp.hold('slow-read');
+  const worker = createWorker(new Map(), { debuggerSendCommand: cdp.send });
+  await flushWorkerTasks();
+
+  const batch = worker.nativeOnMessage.emit({ id: 54, action: 'batch', mode: 'sequential', actions: raceBatch });
+  await flushWorkerTasks();
+  await worker.nativeOnMessage.emit({ id: 55, ...guardedExtraction });
+  slowRead.resolve({ result: { value: 'synthetic-secret' } });
+  await batch;
+
+  assert.deepEqual(cdp.evaluated(), ['slow-read', 'guarded-extraction']);
+  assert.equal(cdp.screenshots(), 0);
+  const reply = worker.nativeMessages.find((message) => message.id === 54);
+  assert.equal(reply?.error, 'Browser output is locked while a protected secret tab is active');
+  assert.equal(reply?.result, undefined);
+});
+
+test('a batch stops mid-batch on the in-flight guarded-action depth alone', async () => {
+  const cdp = cdpRecorder();
+  const slowRead = cdp.hold('slow-read');
+  const extraction = cdp.hold('guarded-extraction');
+  const worker = createWorker(new Map(), { debuggerSendCommand: cdp.send });
+  await flushWorkerTasks();
+  const socket = await openRelayBesideNative(worker);
+
+  const batch = socket.onmessage?.({
+    data: JSON.stringify({ id: 56, action: 'batch', mode: 'sequential', actions: raceBatch }),
+  });
+  await flushWorkerTasks();
+  // A sensitive action with no integer tabId reserves no guard; only the
+  // in-flight depth locks output.
+  const sensitive = worker.nativeOnMessage.emit({ ...guardedExtraction, id: 57, tabId: undefined });
+  await flushWorkerTasks();
+  slowRead.resolve({ result: { value: 'page-text' } });
+  await batch;
+
+  assert.deepEqual(cdp.evaluated(), ['slow-read', 'guarded-extraction']);
+  assert.equal(relayReply(socket, 56)?.error, 'Browser output is locked during guarded extraction');
+  extraction.resolve({ result: { value: 'synthetic-secret' } });
+  await sensitive;
+});
+
+test('a batch stops mid-batch when a guard reservation cannot be persisted', async () => {
+  const cdp = cdpRecorder();
+  const slowRead = cdp.hold('slow-read');
+  const worker = createWorker(new Map(), { debuggerSendCommand: cdp.send });
+  await flushWorkerTasks();
+  const socket = await openRelayBesideNative(worker);
+
+  const batch = socket.onmessage?.({
+    data: JSON.stringify({ id: 58, action: 'batch', mode: 'sequential', actions: raceBatch }),
+  });
+  await flushWorkerTasks();
+  worker.setStorageWritesFailing(true);
+  await worker.nativeOnMessage.emit({ id: 59, ...guardedExtraction });
+  assert.match(String(worker.nativeMessages.find((message) => message.id === 59)?.error), /details suppressed/);
+  slowRead.resolve({ result: { value: 'page-text' } });
+  await batch;
+
+  assert.deepEqual(cdp.evaluated(), ['slow-read']);
+  assert.equal(relayReply(socket, 58)?.error, 'Browser output is locked because protected-tab state is unavailable');
+});
+
+test('a parallel batch in flight when a guard appears returns no page data', async () => {
+  const cdp = cdpRecorder();
+  const slowRead = cdp.hold('slow-read');
+  const worker = createWorker(new Map(), { debuggerSendCommand: cdp.send });
+  await flushWorkerTasks();
+  const socket = await openRelayBesideNative(worker);
+
+  const batch = socket.onmessage?.({
+    data: JSON.stringify({ id: 60, action: 'batch', mode: 'parallel', actions: raceBatch }),
+  });
+  await flushWorkerTasks();
+  await worker.nativeOnMessage.emit({ id: 61, ...guardedExtraction });
+  slowRead.resolve({ result: { value: 'synthetic-secret' } });
+  await batch;
+
+  const reply = relayReply(socket, 60);
+  assert.equal(reply?.error, 'Browser output is locked while a protected secret tab is active');
+  assert.equal(reply?.result, undefined);
+  assert.doesNotMatch(socket.sent.join('\n'), /synthetic-secret|page:/);
+});
+
+test('a single relay read in flight when a guard appears returns neither its result nor its error', async () => {
+  const cdp = cdpRecorder();
+  const read = cdp.hold('slow-read');
+  const failingRead = cdp.hold('slow-failing-read');
+  const worker = createWorker(new Map(), { debuggerSendCommand: cdp.send });
+  await flushWorkerTasks();
+  const socket = await openRelayBesideNative(worker);
+
+  const inFlight = socket.onmessage?.({
+    data: JSON.stringify({ id: 62, action: 'evaluateOnPage', tabId: 42, expression: 'slow-read' }),
+  });
+  const failing = socket.onmessage?.({
+    data: JSON.stringify({ id: 63, action: 'evaluateOnPage', tabId: 42, expression: 'slow-failing-read' }),
+  });
+  await flushWorkerTasks();
+  await worker.nativeOnMessage.emit({ id: 64, ...guardedExtraction });
+  read.resolve({ result: { value: 'synthetic-secret' } });
+  failingRead.reject(new Error('Uncaught ReferenceError: synthetic-secret is not defined'));
+  await Promise.all([inFlight, failing]);
+
+  const lock = 'Browser output is locked while a protected secret tab is active';
+  assert.deepEqual(relayReply(socket, 62), { id: 62, error: lock });
+  assert.deepEqual(relayReply(socket, 63), { id: 63, error: lock });
+  assert.doesNotMatch(socket.sent.join('\n'), /synthetic-secret/);
+});
+
+test('a single native read in flight when a guard appears returns neither its result nor its error', async () => {
+  const cdp = cdpRecorder();
+  const read = cdp.hold('slow-read');
+  const failingRead = cdp.hold('slow-failing-read');
+  const worker = createWorker(new Map(), { debuggerSendCommand: cdp.send });
+  await flushWorkerTasks();
+
+  const inFlight = worker.nativeOnMessage.emit({ id: 65, action: 'evaluateOnPage', tabId: 42, expression: 'slow-read' });
+  const failing = worker.nativeOnMessage.emit({
+    id: 66,
+    action: 'evaluateOnPage',
+    tabId: 42,
+    expression: 'slow-failing-read',
+  });
+  await flushWorkerTasks();
+  await worker.nativeOnMessage.emit({ id: 67, ...guardedExtraction });
+  read.resolve({ result: { value: 'synthetic-secret' } });
+  failingRead.reject(new Error('Uncaught ReferenceError: synthetic-secret is not defined'));
+  await Promise.all([inFlight, failing]);
+
+  const lock = 'Browser output is locked while a protected secret tab is active';
+  assert.deepEqual(worker.nativeMessages.find((message) => message.id === 65), { id: 65, error: lock });
+  assert.deepEqual(worker.nativeMessages.find((message) => message.id === 66), { id: 66, error: lock });
+  assert.ok(worker.nativeMessages.find((message) => message.id === 67)?.result, 'the guarded action itself must still answer');
+});
+
+test('output read during a guard stays withheld after the guard expires, and later requests run normally', async () => {
+  const cdp = cdpRecorder();
+  const slowRead = cdp.hold('slow-read');
+  let now = 1_000_000;
+  const worker = createWorker(new Map(), { debuggerSendCommand: cdp.send, now: () => now });
+  await flushWorkerTasks();
+
+  const batch = worker.nativeOnMessage.emit({ id: 70, action: 'batch', mode: 'sequential', actions: raceBatch });
+  await flushWorkerTasks();
+  await worker.nativeOnMessage.emit({ id: 71, ...guardedExtraction, guardTtlSeconds: 1 });
+  now += 1_100;
+  slowRead.resolve({ result: { value: 'synthetic-secret' } });
+  await batch;
+
+  assert.deepEqual(cdp.evaluated(), ['slow-read', 'guarded-extraction']);
+  assert.equal(cdp.screenshots(), 0);
+  assert.deepEqual(worker.nativeMessages.find((message) => message.id === 70), {
+    id: 70,
+    error: 'Browser output is locked because a guarded action ran during this request',
+  });
+
+  await worker.nativeOnMessage.emit({ id: 72, action: 'batch', mode: 'sequential', actions: raceBatch.slice(2) });
+  const fresh = worker.nativeMessages.find((message) => message.id === 72);
+  assert.equal(fresh?.error, undefined);
+  assert.equal(fresh?.result.success, true);
+  assert.equal(cdp.screenshots(), 1);
+});
+
+test('a relay read in flight stays withheld when its guard is released by closing the tab', async () => {
+  const cdp = cdpRecorder();
+  const read = cdp.hold('slow-read');
+  const worker = createWorker(new Map(), { debuggerSendCommand: cdp.send });
+  await flushWorkerTasks();
+  const socket = await openRelayBesideNative(worker);
+
+  const inFlight = socket.onmessage?.({
+    data: JSON.stringify({ id: 73, action: 'evaluateOnPage', tabId: 43, expression: 'slow-read' }),
+  });
+  await flushWorkerTasks();
+  await worker.nativeOnMessage.emit({ id: 74, ...guardedExtraction });
+  await worker.tabRemoved.emit(42);
+  await socket.onmessage?.({ data: JSON.stringify({ id: 75, action: 'queryTabs' }) });
+  assert.deepEqual(relayReply(socket, 75)?.result, [], 'closing the tab should have released the guard');
+  read.resolve({ result: { value: 'synthetic-secret' } });
+  await inFlight;
+
+  assert.deepEqual(relayReply(socket, 73), {
+    id: 73,
+    error: 'Browser output is locked because a guarded action ran during this request',
+  });
+  assert.doesNotMatch(socket.sent.join('\n'), /synthetic-secret/);
+});
+
+test('a batch stops mid-batch when protected state becomes unavailable with no guard left', async () => {
+  const cdp = cdpRecorder();
+  const slowRead = cdp.hold('slow-read');
+  const worker = createWorker(new Map(), { debuggerSendCommand: cdp.send });
+  await flushWorkerTasks();
+
+  const batch = worker.nativeOnMessage.emit({ id: 76, action: 'batch', mode: 'sequential', actions: raceBatch });
+  await flushWorkerTasks();
+  await worker.nativeOnMessage.emit({ id: 77, ...guardedExtraction, tabId: 43 });
+  // Releasing the guard cannot be persisted: no guard remains, but the state is unknown.
+  worker.setStorageWritesFailing(true);
+  await worker.tabRemoved.emit(43);
+  slowRead.resolve({ result: { value: 'page-text' } });
+  await batch;
+
+  assert.deepEqual(cdp.evaluated(), ['slow-read', 'guarded-extraction']);
+  assert.deepEqual(worker.nativeMessages.find((message) => message.id === 76), {
+    id: 76,
+    error: 'Browser output is locked because protected-tab state is unavailable',
+  });
+});
+
+test('a second guarded extraction still runs while an earlier guard is active', async () => {
+  const cdp = cdpRecorder();
+  const worker = createWorker(new Map(), { debuggerSendCommand: cdp.send });
+  await flushWorkerTasks();
+
+  await worker.nativeOnMessage.emit({ id: 78, ...guardedExtraction });
+  await worker.nativeOnMessage.emit({ id: 79, ...guardedExtraction, tabId: 43 });
+
+  assert.ok(worker.nativeMessages.find((message) => message.id === 79)?.result);
+  assert.deepEqual(cdp.evaluated(), ['guarded-extraction', 'guarded-extraction']);
 });

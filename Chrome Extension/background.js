@@ -13,6 +13,9 @@ const MIN_RELAY_KEY_BYTES = 32;
 
 let socket = null;
 let sensitiveActionDepth = 0;
+// Bumped whenever a guarded action starts. A request that saw another value on
+// entry overlapped a guard, even one that has since expired or been released.
+let outputLockEpoch = 0;
 let protectedTabGuards = new Map();
 let protectedTabStateUnavailable = false;
 let relayConfig = null;
@@ -235,12 +238,10 @@ async function handleNativeMessage(message) {
     sendNativeResponse(id, { error: 'Browser output is locked because protected-tab state is unavailable' });
     return;
   }
-  if (!sensitive && hasActiveProtectedTabs()) {
-    sendNativeResponse(id, { error: 'Browser output is locked while a protected secret tab is active' });
-    return;
-  }
-  if (!sensitive && sensitiveActionDepth > 0) {
-    sendNativeResponse(id, { error: 'Browser output is locked during guarded extraction' });
+  const epoch = outputLockEpoch;
+  const entryLock = sensitive ? null : browserOutputLock(epoch);
+  if (entryLock) {
+    sendNativeResponse(id, { error: entryLock });
     return;
   }
   if (sensitive && !recoveryClose && sensitiveActionDepth > 0) {
@@ -248,7 +249,10 @@ async function handleNativeMessage(message) {
     return;
   }
   const tracksSensitiveAction = sensitive && !recoveryClose;
-  if (tracksSensitiveAction) sensitiveActionDepth += 1;
+  if (tracksSensitiveAction) {
+    sensitiveActionDepth += 1;
+    outputLockEpoch += 1;
+  }
   let reservation = null;
   try {
     if (sensitive && !recoveryClose && Number.isInteger(Number(params.tabId))) {
@@ -269,7 +273,8 @@ async function handleNativeMessage(message) {
         throw new Error('Protected-tab finalization failed');
       }
     }
-    sendNativeResponse(id, { result });
+    const lock = sensitive ? null : browserOutputLock(epoch);
+    sendNativeResponse(id, lock ? { error: lock } : { result });
   } catch (err) {
     if (reservation && !protectedTabStateUnavailable) {
       try {
@@ -283,7 +288,7 @@ async function handleNativeMessage(message) {
       sendNativeResponse(id, { error: 'Sensitive browser action failed; details suppressed' });
     } else {
       console.error(`Error executing native action ${action}:`, err);
-      sendNativeResponse(id, { error: err.toString() });
+      sendNativeResponse(id, { error: browserOutputLock(epoch) ?? err.toString() });
     }
   } finally {
     if (tracksSensitiveAction) sensitiveActionDepth -= 1;
@@ -661,6 +666,7 @@ function batchItemsOf(action, params) {
 }
 
 async function runBatch(actions, options = {}) {
+  const epoch = outputLockEpoch;
   const mode = options.mode === 'sequential' ? 'sequential' : 'parallel';
   const stopOnError = options.stopOnError !== false;
   const normalized = actions.map((item, index) => {
@@ -679,15 +685,17 @@ async function runBatch(actions, options = {}) {
       throw new Error(`Batch item ${index} sends CDP method "${method}", which batches do not allow`);
     }
     const { action, ...params } = item;
-    if (isProtectedTab(params.tabId)) {
-      throw new Error(`Batch item ${index} targets a protected secret tab`);
-    }
     return { action, params };
   });
 
   if (mode === 'sequential') {
     const results = [];
     for (let index = 0; index < normalized.length; index += 1) {
+      // A guard can appear while an earlier item awaits: the host has stopped
+      // tracking a native request once it times out. Stop the whole batch, whatever
+      // stopOnError says; its caller gets the lock error only.
+      const lock = browserOutputLock(epoch);
+      if (lock) throw new Error(lock);
       const { action, params } = normalized[index];
       try {
         const result = await executeAction(action, params);
@@ -950,25 +958,21 @@ async function handleWsMessage(message, targetSocket = socket, generation = rela
   await protectedTabGuardsReady;
   if (targetSocket !== socket || generation !== relayConfigGeneration) return;
   const { id, action, ...params } = message;
-  if (protectedTabStateUnavailable) {
-    sendSocketResponse(id, { error: 'Browser output is locked because protected-tab state is unavailable' }, targetSocket, generation);
+  const epoch = outputLockEpoch;
+  const entryLock = browserOutputLock(epoch);
+  if (entryLock) {
+    sendSocketResponse(id, { error: entryLock }, targetSocket, generation);
     return;
   }
-  if (hasActiveProtectedTabs()) {
-    sendSocketResponse(id, { error: 'Browser output is locked while a protected secret tab is active' }, targetSocket, generation);
-    return;
-  }
-  if (sensitiveActionDepth > 0) {
-    sendSocketResponse(id, { error: 'Browser output is locked during guarded extraction' }, targetSocket, generation);
-    return;
-  }
+  let payload;
   try {
-    const result = await executeAction(action, params);
-    sendSocketResponse(id, { result }, targetSocket, generation);
+    payload = { result: await executeAction(action, params) };
   } catch (err) {
     console.error(`Error executing action ${action}:`, err);
-    sendSocketResponse(id, { error: err.toString() }, targetSocket, generation);
+    payload = { error: err.toString() };
   }
+  const lock = browserOutputLock(epoch);
+  sendSocketResponse(id, lock ? { error: lock } : payload, targetSocket, generation);
 }
 
 chrome.debugger.onEvent.addListener(async (source, method, params) => {
@@ -1003,6 +1007,18 @@ function isProtectedTab(tabId) {
     return false;
   }
   return true;
+}
+
+// Why output of a non-sensitive request that started at `sinceEpoch` is withheld,
+// or null when it may flow. Checked on entry, between batch items, and again before
+// any result or error is sent: whatever a request read while a guarded action ran
+// stays withheld, even after that guard expires or its tab closes.
+function browserOutputLock(sinceEpoch) {
+  if (protectedTabStateUnavailable) return 'Browser output is locked because protected-tab state is unavailable';
+  if (hasActiveProtectedTabs()) return 'Browser output is locked while a protected secret tab is active';
+  if (sensitiveActionDepth > 0) return 'Browser output is locked during guarded extraction';
+  if (sinceEpoch !== outputLockEpoch) return 'Browser output is locked because a guarded action ran during this request';
+  return null;
 }
 
 function hasActiveProtectedTabs() {
