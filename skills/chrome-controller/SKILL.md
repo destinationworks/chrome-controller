@@ -105,7 +105,10 @@ Relay credentials are generated per server instance, saved in a `0600` discovery
 | `ensureDebugger`     | `tabId`                               | Attach debugger (idempotent)      |
 | `visualizeAction`    | `tabId`, `type`, `x`, `y`, `detail`   | HUD overlay effect                |
 | `cleanupManagedTabs` | `closeTabs`                           | Release or close AI-managed tabs  |
-| `batch`              | `actions`, `mode`                     | Nested batch                      |
+| `setOverlayHidden`   | `hidden`                              | Hide or show the HUD overlay      |
+| `getOverlayState`    |                                       | Overlay and controlled-tab state  |
+
+A raw batch request names `action: "batch"` and puts its items in one array, `actions` or `commands`, never both. A request whose item list is missing or not an array is refused, and so is any other action that carries `actions` or `commands`. A batch item cannot itself be a `batch`.
 
 ```json
 {

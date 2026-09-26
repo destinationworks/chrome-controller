@@ -213,7 +213,7 @@ test('batch request partial failure when extension disconnects mid-batch', async
       mode: 'sequential',
       actions: [
         { action: 'queryTabs', requestTimeoutMs: 500 },
-        { action: 'navigate', requestTimeoutMs: 500 },
+        { action: 'updateTab', requestTimeoutMs: 500 },
       ],
     },
     TEST_KEY,
@@ -262,8 +262,8 @@ test('parallel batch loses responses when extension disconnects', async () => {
       mode: 'parallel',
       actions: [
         { action: 'queryTabs', requestTimeoutMs: 500 },
-        { action: 'navigate', requestTimeoutMs: 500 },
-        { action: 'click', requestTimeoutMs: 500 },
+        { action: 'updateTab', requestTimeoutMs: 500 },
+        { action: 'clickSelector', requestTimeoutMs: 500 },
       ],
     },
     TEST_KEY,
