@@ -16,6 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import chromeControllerPiExtension from './index.ts';
+import { HEALTH_CHROME_WAIT_MS } from './chrome-wait.ts';
 
 const TEST_API_KEY = 'test-key-0123456789abcdef01234567';
 const IPC_TIMEOUT_MS = 400;
@@ -314,6 +315,7 @@ test('only the first answer line counts when two arrive in one read', async () =
 test('a connection dropped while the request is still being written is a protocol error', async () => {
   // The host stops reading and drops the socket while a large request is
   // still in flight, so the client's write fails after connect (EPIPE/ECONNRESET).
+  // Instant, because animated typing of 8 MB is refused before it is sent.
   const socketPath = path.join(tmpDir, 'reset.sock');
   const server = net.createServer({ pauseOnConnect: true }, (socket) => {
     socket.on('error', () => {});
@@ -325,7 +327,7 @@ test('a connection dropped while the request is still being written is a protoco
   const tools = loadTools();
   try {
     await assert.rejects(
-      () => tools['chrome_type_text'].execute('c1', { tabId: 1, text: 'x'.repeat(8 * 1024 * 1024) }, undefined),
+      () => tools['chrome_type_text'].execute('c1', { tabId: 1, text: 'x'.repeat(8 * 1024 * 1024), instant: true }, undefined),
       (err: Error) => {
         assert.match(err.message, /^NATIVE_IPC_PROTOCOL_ERROR: .*connection failed after the request was sent \(.*(EPIPE|ECONNRESET)/);
         return true;
@@ -438,6 +440,8 @@ test('health reports NativeMessagingIPC when the host answers queryTabs', async 
   try {
     const result = parsed(await tools['chrome_controller_health'].execute('c1', {}, undefined));
     assert.deepEqual(result, { success: true, extensionConnected: true, mode: 'NativeMessagingIPC' });
+    // A short Chrome wait, so a silent Chrome is reported before an ordinary command would give up.
+    assert.deepEqual(host.requests, [{ action: 'queryTabs', timeoutMs: HEALTH_CHROME_WAIT_MS }]);
     assert.deepEqual(relayCalls, []);
   } finally {
     await host.close();
@@ -572,10 +576,33 @@ test('chrome_batch names the batch action, which the host forwards to Chrome ver
       'c1', { mode: 'sequential', stopOnError: true, actions: [{ action: 'queryTabs' }] }, undefined,
     ));
     assert.deepEqual(host.requests, [
-      { action: 'batch', mode: 'sequential', stopOnError: true, actions: [{ action: 'queryTabs' }] },
+      {
+        action: 'batch', mode: 'sequential', stopOnError: true, actions: [{ action: 'queryTabs' }],
+        // The batch's own wait: one ordinary round trip plus a per-item allowance.
+        requestTimeoutMs: 16000,
+      },
     ]);
     assert.equal(result.success, true);
     assert.equal(result.error, undefined);
+    assert.deepEqual(relayCalls, []);
+  } finally {
+    await host.close();
+  }
+});
+
+// ── Requests that cannot finish ──────────────────────────────────────────────
+
+test('a request that cannot finish within the cap is refused before it reaches the host or the relay', async () => {
+  const host = await startFakeHost((_req, socket) => socket.write('{"success":true,"result":"typed"}\n'));
+  allowRelay();
+  const tools = loadTools();
+  try {
+    // 5000 animated keystrokes at the default delay need more than 120 s of Chrome time.
+    await assert.rejects(
+      () => tools['chrome_type_text'].execute('c1', { tabId: 1, text: 'x'.repeat(5000) }, undefined),
+      /^Error: batch needs at least \d+ms of Chrome time, beyond the 120000ms limit/,
+    );
+    assert.deepEqual(host.requests, []);
     assert.deepEqual(relayCalls, []);
   } finally {
     await host.close();

@@ -21,6 +21,7 @@ import {
   readHostPid,
 } from './native-host.js';
 import { removeDiscovery, writeDiscovery } from './discovery.js';
+import { startScriptedChrome } from '../test/scripted-chrome.ts';
 
 const TEST_API_KEY = 'test-key-0123456789abcdef01234567';
 
@@ -643,6 +644,65 @@ test('NativeMessagingHost rejects unbounded or non-numeric request timeouts', as
   } finally {
     host.close();
     fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('the host waits requestTimeoutMs, the key the relay honours, ahead of timeoutMs', async (t) => {
+  if (process.platform === 'win32') return;
+  const chrome = await startScriptedChrome('nmh-request-timeout-');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const answered = chrome.host.requestFromChrome('queryTabs', { timeoutMs: 1000, requestTimeoutMs: 5000 });
+    const first = await chrome.nextRequest();
+    t.mock.timers.tick(4999);
+    chrome.answer(first.id, 'in time');
+    assert.equal(await answered, 'in time');
+
+    const silent = chrome.host.requestFromChrome('queryTabs', { timeoutMs: 1000, requestTimeoutMs: 5000 });
+    await chrome.nextRequest();
+    t.mock.timers.tick(5000);
+    await assert.rejects(silent, /Native Messaging request timed out after 5000ms/);
+
+    await assert.rejects(
+      chrome.host.requestFromChrome('queryTabs', { requestTimeoutMs: 120001 }),
+      /timeout must be an integer/i,
+    );
+  } finally {
+    chrome.close();
+  }
+});
+
+test('the host refuses at once an action that cannot finish within its cap, forwarding nothing', async () => {
+  if (process.platform === 'win32') return;
+  const chrome = await startScriptedChrome('nmh-impossible-');
+  const forwarded: unknown[] = [];
+  chrome.host.sendToChrome = (payload) => { forwarded.push(payload); };
+  try {
+    await assert.rejects(
+      chrome.host.requestFromChrome('getConsoleLogs', { tabId: 1, timeoutMs: 200000 }),
+      /getConsoleLogs needs at least 200000ms of Chrome time, beyond the 120000ms limit/,
+    );
+    assert.deepEqual(forwarded, [], 'Chrome never starts work the host would abandon');
+  } finally {
+    chrome.close();
+  }
+});
+
+test('the host never uses a console-collection window as its wait for Chrome', async (t) => {
+  if (process.platform === 'win32') return;
+  const chrome = await startScriptedChrome('nmh-console-window-');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    // The extension answers getConsoleLogs only after collecting for the whole
+    // window, so a wait equal to the window always loses the race.
+    const logs = chrome.host.requestFromChrome('getConsoleLogs', { tabId: 1, timeoutMs: 2000 });
+    const request = await chrome.nextRequest();
+    assert.equal(request.timeoutMs, 2000, 'the window still reaches the extension');
+    t.mock.timers.tick(2007); // measured on a live Chrome
+    chrome.answer(request.id, { logs: [], count: 0 });
+    assert.deepEqual(await logs, { logs: [], count: 0 });
+  } finally {
+    chrome.close();
   }
 });
 

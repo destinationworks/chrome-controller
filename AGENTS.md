@@ -28,6 +28,14 @@ The controller supports two operational modes:
    refusing to script `chromewebstore.google.com`). Confirm host state with `npm run watchdog`
    before reporting it.
 
+   Request timeouts come only from `src/chrome-wait.ts`: the extension's work < the host's wait for
+   Chrome < the client's wait for the host. Never hardcode a per-command IPC client timeout or host wait; the
+   only fixed waits are there, for answers the host gives itself (`HOST_LOCAL_WAIT_MS`) and health
+   checks (`HEALTH_CHROME_WAIT_MS`). The clients' `ipcTimeoutMs` overrides exist for transport tests only. A client that gives up first
+   replaces the host's definitive answer with an ambiguous timeout. When an extension action gains
+   working time (a loop, a sleep, a collection window), update `chromeWorkMs` and its
+   virtual-clock test in `src/extension-background.test.ts`.
+
 2. **Standalone Relay Server (Fallback / Tests):**
    If Native Messaging is unavailable, run:
    ```bash

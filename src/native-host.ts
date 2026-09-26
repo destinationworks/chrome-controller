@@ -7,6 +7,7 @@ import {
   buildGuardedInjectionExpression,
 } from './secure-extraction.js';
 import { normalizeInstanceName, readDiscovery } from './discovery.js';
+import { chromeWaitMs } from './chrome-wait.js';
 
 export function getSocketPath(): string {
   if (process.platform === 'win32') {
@@ -372,10 +373,11 @@ export class NativeMessagingHost {
     const forwardedParams = internalSensitive
       ? { ...params, sensitive: true }
       : stripInternalSensitiveParams(params);
-    const requestedTimeout = forwardedParams.timeoutMs;
-    const timeoutMs = requestedTimeout === undefined ? 15000 : requestedTimeout;
-    if (typeof timeoutMs !== 'number' || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000) {
-      return Promise.reject(new Error('Native Messaging request timeout must be an integer from 1 to 120000 milliseconds'));
+    let timeoutMs: number;
+    try {
+      timeoutMs = chromeWaitMs(action, forwardedParams);
+    } catch (error) {
+      return Promise.reject(error);
     }
     return new Promise((resolve, reject) => {
       const id = this.requestIdCounter++;

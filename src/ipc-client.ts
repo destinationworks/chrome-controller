@@ -12,8 +12,9 @@ import net from 'node:net';
  * reached the host; every other kind means the host received it, so the
  * command may already have run in Chrome and must not be replayed elsewhere.
  * - `unavailable`: the connection could not be opened (ENOENT, ECONNREFUSED, ...).
- * - `timeout`: the host did not answer in time -- either it is wedged or it
- *   is still waiting on a slow Chrome.
+ * - `timeout`: the host missed its own deadline for the request. Clients wait
+ *   past that deadline (see chrome-wait.ts), and a host waiting on a slow
+ *   Chrome answers with its own timeout first, so this points to a wedged host.
  * - `protocol`: the connection closed, reset, or returned garbage before a
  *   complete answer.
  * A host answer of `{ success: false }` is not a failure here: it is the
@@ -147,8 +148,8 @@ export function describeIpcFailure(error: IpcError, socketPath: string, relayHin
     case 'timeout':
       return new IpcError('timeout',
         `NATIVE_IPC_TIMEOUT: Native host at ${socketPath} accepted the request but ${error.message}. ` +
-        `Either the host is wedged or it is still waiting on a slow Chrome. Run \`npm run watchdog\` to tell them apart: ` +
-        `it probes with hostPing, which the host answers locally without Chrome. ${notRetried}`);
+        `A healthy host answers a slow Chrome with its own timeout before this, so the host is probably wedged. ` +
+        `Run \`npm run watchdog\` to confirm: it probes with hostPing, which the host answers locally without Chrome. ${notRetried}`);
     case 'protocol':
       return new IpcError('protocol',
         `NATIVE_IPC_PROTOCOL_ERROR: Native host at ${socketPath} ${error.message}. ` +

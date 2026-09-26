@@ -214,8 +214,9 @@ and only an unreachable socket may fall back to the HTTP relay (when `CHROME_CON
 
 - `NATIVE_IPC_UNAVAILABLE`: the socket could not be opened (no host, or a stale socket). The request
   never reached the host. With relay permission the request goes to the relay instead.
-- `NATIVE_IPC_TIMEOUT`: the host accepted the request but did not answer in time (10 s). It is either
-  wedged or still waiting on a slow Chrome; `npm run watchdog` tells them apart.
+- `NATIVE_IPC_TIMEOUT`: the host accepted the request but missed its own deadline for it (see the
+  timeout budget below). A healthy host waiting on a slow Chrome answers `Native Messaging request
+  timed out after <N>ms` instead, so suspect a wedged host and run `npm run watchdog`.
 - `NATIVE_IPC_PROTOCOL_ERROR`: the host closed or broke the connection, or sent an unreadable answer.
 - A host answer with `success: false` is returned to the agent unchanged. The host is healthy; the
   command itself failed.
@@ -241,14 +242,23 @@ consulting the relay, plus the host's own view from `hostPing` when available: `
   reached (no host, or a stale socket), and only that error may fall back to the HTTP relay when
   `CHROME_CONTROLLER_ALLOW_RELAY=1`:
   - `NATIVE_IPC_UNAVAILABLE`: the connection could not be opened. The request never reached the host.
-  - `NATIVE_IPC_TIMEOUT`: the host accepted the request but did not answer in time. The host is either
-    wedged or still waiting on a slow Chrome; `npm run watchdog` tells them apart.
+  - `NATIVE_IPC_TIMEOUT`: the host accepted the request but missed its own deadline for it (see the
+    timeout budget below). A healthy host waiting on a slow Chrome answers `Native Messaging request
+    timed out after <N>ms` instead, so suspect a wedged host and run `npm run watchdog`.
   - `NATIVE_IPC_PROTOCOL_ERROR`: the host closed or broke the connection, or sent an unreadable answer.
   - Any other message (for example `The extensions gallery cannot be scripted.`) is the host's own
     answer, passed through unchanged. The host is healthy; the command itself failed.
 
   Timeouts and protocol errors are never retried automatically, because the command may already have
   run in Chrome.
+- Every request's timeouts come from one budget (`src/chrome-wait.ts`). The host waits 15 s for Chrome,
+  plus the action's own working time (a recording's frames, a console-collection window, animated typing),
+  up to 120 s. Agent clients wait 2 s longer than the host. So `Native Messaging request timed out after
+  <N>ms` means the host is fine and Chrome did not answer, while `NATIVE_IPC_TIMEOUT` means the host itself
+  missed its deadline: run `npm run watchdog`. A request that cannot finish within 120 s even on
+  an instant Chrome (a longer console window, very long typing) is refused at once; split it instead.
+  Set a request's wait explicitly with `requestTimeoutMs`. On `getConsoleLogs`, `timeoutMs` is the
+  collection window, not a wait.
 - Communication with agent processes occurs over the user-isolated Unix socket `~/.chrome-controller/run/chrome-controller.sock` (or `$XDG_RUNTIME_DIR/chrome-controller/run.sock` when that variable is set), in a directory created with mode `0700` and verified to be owned by the current user.
 - No listening TCP ports are opened, preventing any local network sniffing or unauthorized local access.
 

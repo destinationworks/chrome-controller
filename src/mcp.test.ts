@@ -19,12 +19,14 @@ import {
   HOST_STATE_REMEDIATION,
   HEALTH_PROBE_TIMEOUT_MS,
   HEALTH_CHROME_WAIT_MS,
-  HEALTH_IPC_CLIENT_TIMEOUT_MS,
   HostRejectedError,
   type IpcError,
 } from './mcp.js';
 import { removeDiscovery, writeDiscovery } from './discovery.js';
 import { spawn } from 'node:child_process';
+import { createChromeControllerServer } from './server.js';
+import { WebSocket } from 'ws';
+import { setEnv, startLargeAnswerHost, startScriptedChrome } from '../test/scripted-chrome.ts';
 
 const TEST_API_KEY = 'test-key-0123456789abcdef01234567';
 
@@ -1178,12 +1180,265 @@ test('every non-alive host state has remediation text', () => {
   assert.ok(HOST_STATE_REMEDIATION.extensionSilent.includes('chrome://extensions'));
 });
 
-test('health waits are ordered so the host answers before the IPC client gives up', () => {
-  // Equal timeouts race: whichever fires first decides whether the operator
-  // sees the ambiguous "IPC timeout" or the definitive "Chrome did not answer".
-  assert.ok(
-    HEALTH_CHROME_WAIT_MS < HEALTH_IPC_CLIENT_TIMEOUT_MS,
-    'the host must give up on Chrome before the IPC client gives up on the host',
-  );
+test('a health check against a silent Chrome reports the host\'s answer, not a client timeout', async (t) => {
+  if (process.platform === 'win32') return;
   assert.ok(HEALTH_PROBE_TIMEOUT_MS < HEALTH_CHROME_WAIT_MS);
+  const chrome = await startScriptedChrome('mcp-health-wait-');
+  t.after(() => chrome.close());
+  t.after(setEnv({ CHROME_CONTROLLER_SOCKET: chrome.socketPath, HTTP_PORT: undefined, CHROME_CONTROLLER_ALLOW_RELAY: undefined }));
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  // Equal waits race: whichever fires first decides whether the operator sees
+  // the ambiguous IPC timeout or the definitive "Chrome did not answer".
+  const report = buildHealthReport(
+    async () => ({ state: 'alive', detail: 'scripted' } as never),
+    () => sendCommand('queryTabs', { timeoutMs: HEALTH_CHROME_WAIT_MS }),
+  );
+  await chrome.nextRequest();
+  t.mock.timers.tick(HEALTH_CHROME_WAIT_MS);
+  const result = await report;
+  assert.equal(result.hostState, 'alive');
+  assert.equal(result.extensionConnected, false);
+  assert.match(String(result.detail), /Native Messaging request timed out after 8000ms/);
 });
+
+// ── IPC client wait vs. the host's Chrome wait ──────────────────────────────
+//
+// These drive a real NativeMessagingHost whose Chrome is scripted, with both
+// the host's timer and the IPC client's timer on the mocked clock, so each test
+// decides which deadline is reached first.
+
+test('a healthy host delivers its own Chrome timeout before the IPC client gives up', async (t) => {
+  if (process.platform === 'win32') return;
+  const chrome = await startScriptedChrome('mcp-wait-order-');
+  const restoreEnv = setEnv({ CHROME_CONTROLLER_SOCKET: chrome.socketPath, HTTP_PORT: undefined, CHROME_CONTROLLER_ALLOW_RELAY: undefined });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const outcome = sendCommand('queryTabs').then(() => 'resolved', (error: Error) => error.message);
+    await chrome.nextRequest(); // Chrome has the request and never answers.
+    t.mock.timers.tick(15000); // the host's default Chrome wait
+    const message = await outcome;
+    // The host's answer is definitive: the host is fine and Chrome did not answer.
+    // A client-side timeout here would instead blame "wedged host or slow Chrome".
+    assert.match(message, /Native Messaging request timed out after 15000ms/);
+    assert.doesNotMatch(message, /NATIVE_IPC_TIMEOUT/);
+  } finally {
+    restoreEnv();
+    chrome.close();
+  }
+});
+
+// Wall-clock durations of real actions, measured against a live Chrome through
+// the native host (docs/leanings/2026-09-23-ipc-client-gave-up-before-the-host-it-was-waiting-on.md).
+const MEASURED_CHROME_WORK: { name: string; action: string; params: Record<string, unknown>; chromeMs: number }[] = [
+  { name: 'captureVideo at its defaults (5 fps, 3 s, jpeg)', action: 'captureVideo', params: { tabId: 1 }, chromeMs: 8150 },
+  { name: 'captureVideo as png', action: 'captureVideo', params: { tabId: 1, fps: 5, duration: 3, format: 'png' }, chromeMs: 11016 },
+  { name: 'captureVideo at 10 fps for 3 s', action: 'captureVideo', params: { tabId: 1, fps: 10, duration: 3 }, chromeMs: 11406 },
+  { name: 'captureVideo at 30 fps for 2 s', action: 'captureVideo', params: { tabId: 1, fps: 30, duration: 2 }, chromeMs: 21968 },
+  { name: 'getConsoleLogs with its 2 s collection window', action: 'getConsoleLogs', params: { tabId: 1, timeoutMs: 2000 }, chromeMs: 2007 },
+  {
+    name: 'animated typing of 52 characters at 50 ms',
+    action: 'sendCommand',
+    params: {
+      tabId: 1,
+      method: 'Input.insertText',
+      commandParams: { text: 'The quick brown fox, jumps over the lazy dog. Again!', animateTyping: true, typingDelayMs: 50, sound: false },
+    },
+    chromeMs: 10423,
+  },
+  {
+    // chrome_type_text's own shape: the same typing inside a batch, after the
+    // ~345 ms ensureDebugger measured on a live Chrome.
+    name: 'chrome_type_text\'s batch typing 52 characters at 50 ms',
+    action: 'batch',
+    params: {
+      mode: 'sequential',
+      actions: [
+        { action: 'ensureDebugger', tabId: 1 },
+        {
+          action: 'sendCommand',
+          tabId: 1,
+          method: 'Input.insertText',
+          commandParams: { text: 'The quick brown fox, jumps over the lazy dog. Again!', animateTyping: true, typingDelayMs: 50, sound: false },
+        },
+      ],
+    },
+    chromeMs: 10423 + 345,
+  },
+];
+
+for (const { name, action, params, chromeMs } of MEASURED_CHROME_WORK) {
+  test(`${name}, answered after the measured ${chromeMs}ms, reaches the caller`, async (t) => {
+    if (process.platform === 'win32') return;
+    const chrome = await startScriptedChrome('mcp-measured-work-');
+    const restoreEnv = setEnv({ CHROME_CONTROLLER_SOCKET: chrome.socketPath, HTTP_PORT: undefined, CHROME_CONTROLLER_ALLOW_RELAY: undefined });
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      const outcome = sendCommand(action, params);
+      outcome.catch(() => {}); // still asserted below; avoids an unhandled rejection if setup fails first
+      const request = await chrome.nextRequest();
+      t.mock.timers.tick(chromeMs);
+      chrome.answer(request.id, { finished: action });
+      assert.deepStrictEqual(await outcome, { finished: action });
+    } finally {
+      restoreEnv();
+      chrome.close();
+    }
+  });
+}
+
+test('a guarded extraction whose Chrome goes silent gets the host\'s fail-closed answer, not a client timeout', async (t) => {
+  if (process.platform === 'win32') return;
+  const chrome = await startScriptedChrome('mcp-guarded-wait-');
+  const restoreEnv = setEnv({ CHROME_CONTROLLER_SOCKET: chrome.socketPath, HTTP_PORT: undefined, CHROME_CONTROLLER_ALLOW_RELAY: undefined });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const outcome = sendCommand('extractSecretGuarded', { tabId: 7, selector: '#token' })
+      .then(() => 'resolved', (error: Error) => error.message);
+    // The page action gets no answer within the host's ordinary wait...
+    const evaluate = await chrome.nextRequest();
+    assert.equal(evaluate.action, 'evaluateOnPage');
+    t.mock.timers.tick(15000);
+    // ...so the host tries to close the tab, which gets no answer either.
+    const close = await chrome.nextRequest();
+    assert.equal(close.action, 'removeTab');
+    t.mock.timers.tick(15000);
+    // Only the host knows the tab may still hold the secret; a client timeout
+    // would have dropped that instruction on the floor.
+    assert.match(await outcome, /Guarded extraction failed and the source tab could not be closed/);
+  } finally {
+    restoreEnv();
+    chrome.close();
+  }
+});
+
+test('over the relay, an action with work of its own carries its wait; an ordinary one is sent unchanged', async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+    req.on('end', () => {
+      bodies.push(JSON.parse(body));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, result: {} }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const port = (server.address() as net.AddressInfo).port;
+  const restoreEnv = setEnv({ HTTP_PORT: String(port), API_KEY: TEST_API_KEY });
+  try {
+    await sendCommand('captureVideo', { tabId: 1, fps: 30, duration: 2 });
+    await sendCommand('getConsoleLogs', { tabId: 1, timeoutMs: 2000 });
+    await sendCommand('queryTabs', { queryInfo: {} });
+    // The relay's own default wait (10s) knows nothing of the action.
+    // 15 s + 60 frames x (33 ms interval + 1000 ms allowance): past the 21968 ms measured.
+    assert.equal(bodies[0].requestTimeoutMs, 76980);
+    assert.equal(bodies[1].timeoutMs, 2000, 'the collection window still reaches the extension');
+    assert.equal(bodies[1].requestTimeoutMs, 17000);
+    assert.deepStrictEqual(bodies[2], { queryInfo: {}, action: 'queryTabs' });
+  } finally {
+    restoreEnv();
+    server.close();
+  }
+});
+
+test('a 30 MB answer is read within the delivery margin, so a client timeout still means the host missed its deadline', async () => {
+  if (process.platform === 'win32') return;
+  // Real timers: the host answers at once, so the client's whole budget is the
+  // 1 ms wait plus the delivery margin, which must cover reading the answer.
+  const bytes = 30 * 1024 * 1024;
+  const host = await startLargeAnswerHost('mcp-large-answer-', bytes);
+  const restoreEnv = setEnv({ CHROME_CONTROLLER_SOCKET: host.socketPath, HTTP_PORT: undefined, CHROME_CONTROLLER_ALLOW_RELAY: undefined });
+  try {
+    const result = await sendCommand('queryTabs', { requestTimeoutMs: 1 }) as { data: string };
+    assert.equal(result.data.length, bytes);
+  } finally {
+    restoreEnv();
+    host.close();
+  }
+});
+
+test('over the real relay, a long action inside a batch gets its own wait', async () => {
+  // The relay splits a batch and waits for each item separately, so the wait
+  // stamped on the batch as a whole never reaches the items.
+  const relay = createChromeControllerServer({ httpPort: 0, wsPort: 0, apiKey: TEST_API_KEY, writeDiscoveryFile: false });
+  const { httpPort, wsPort } = await relay.ready;
+  // A fake extension that, like the real one, answers getConsoleLogs only after
+  // its collection window, plus the ~7 ms of setup measured on a live Chrome.
+  const extension = await new Promise<WebSocket>((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${wsPort}?key=${TEST_API_KEY}`);
+    ws.on('error', reject);
+    ws.on('message', (data: Buffer) => {
+      const message = JSON.parse(data.toString());
+      if (message.id === undefined) return;
+      const delayMs = message.action === 'getConsoleLogs' ? Number(message.timeoutMs) + 100 : 0;
+      setTimeout(() => ws.send(JSON.stringify({ id: message.id, result: { handled: message.action } })), delayMs);
+    });
+    ws.on('open', () => setTimeout(() => resolve(ws), 50));
+  });
+  const restoreEnv = setEnv({ HTTP_PORT: String(httpPort), API_KEY: TEST_API_KEY });
+  try {
+    const bare = await sendCommand('getConsoleLogs', { tabId: 1, timeoutMs: 300 });
+    assert.deepStrictEqual(bare, { handled: 'getConsoleLogs' });
+    // The relay answers 200 only when every item succeeded, and 207 (which
+    // sendCommand rejects as `HTTP 207`) when any item timed out.
+    await sendCommand('batch', {
+      mode: 'sequential',
+      actions: [{ action: 'getConsoleLogs', tabId: 1, timeoutMs: 300 }, { action: 'queryTabs' }],
+    });
+  } finally {
+    restoreEnv();
+    extension.close();
+    relay.close();
+  }
+});
+
+test('a guarded injection whose Chrome goes silent gets the host\'s fail-closed answer, not a client timeout', async (t) => {
+  if (process.platform === 'win32') return;
+  const chrome = await startScriptedChrome('mcp-guarded-inject-');
+  t.after(() => chrome.close());
+  t.after(setEnv({ CHROME_CONTROLLER_SOCKET: chrome.socketPath, HTTP_PORT: undefined, CHROME_CONTROLLER_ALLOW_RELAY: undefined }));
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const outcome = sendCommand('injectSecretGuarded', { tabId: 7, selector: '#password', value: 'synthetic-value-9' })
+    .then(() => 'resolved', (error: Error) => error.message);
+  assert.equal((await chrome.nextRequest()).action, 'evaluateOnPage');
+  t.mock.timers.tick(15000);
+  assert.equal((await chrome.nextRequest()).action, 'removeTab');
+  t.mock.timers.tick(15000);
+  assert.match(await outcome, /Guarded injection failed and the target tab could not be closed/);
+});
+
+test('a request that cannot finish within the cap is refused before it reaches the host or the relay', async () => {
+  if (process.platform === 'win32') return;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-fail-fast-'));
+  const socketPath = path.join(dir, 'run.sock');
+  let connections = 0;
+  const host = net.createServer((socket) => {
+    connections++;
+    socket.end('{"success":true,"result":"typed"}\n');
+  });
+  await new Promise<void>((resolve) => host.listen(socketPath, resolve));
+  const restoreEnv = setEnv({ CHROME_CONTROLLER_SOCKET: socketPath, HTTP_PORT: undefined, CHROME_CONTROLLER_ALLOW_RELAY: '1' });
+  try {
+    // 5000 animated keystrokes at the default delay need more than 120 s of Chrome time.
+    await assert.rejects(
+      () => sendCommand('batch', buildTypeTextBatchForTest('x'.repeat(5000))),
+      /^Error: batch needs at least \d+ms of Chrome time, beyond the 120000ms limit/,
+    );
+    // Never sent: a relay attempt would instead fail on the missing relay config.
+    assert.equal(connections, 0);
+  } finally {
+    restoreEnv();
+    await new Promise<void>((resolve) => host.close(() => resolve()));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function buildTypeTextBatchForTest(text: string): Record<string, unknown> {
+  return {
+    mode: 'sequential',
+    actions: [
+      { action: 'ensureDebugger', tabId: 1 },
+      { action: 'sendCommand', tabId: 1, method: 'Input.insertText', commandParams: { text, animateTyping: true, typingDelayMs: 50 } },
+    ],
+  };
+}

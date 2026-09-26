@@ -100,7 +100,7 @@ Relay credentials are generated per server instance, saved in a `0600` discovery
 | `captureScreenshot`  | `tabId`, `screenshotOptions`          | PNG/JPEG/WebP via CDP             |
 | `captureVideo`       | `tabId`, `fps`, `duration`, `format`  | CDP screenshot sequence           |
 | `evaluateOnPage`     | `tabId`, `expression`, `awaitPromise` | `Runtime.evaluate` via CDP        |
-| `getConsoleLogs`     | `tabId`, `timeoutMs`                  | Collect `consoleAPICalled` events |
+| `getConsoleLogs`     | `tabId`, `timeoutMs`                  | `timeoutMs` = collection window   |
 | `sendCommand`        | `tabId`, `method`, `commandParams`    | Raw CDP command                   |
 | `ensureDebugger`     | `tabId`                               | Attach debugger (idempotent)      |
 | `visualizeAction`    | `tabId`, `type`, `x`, `y`, `detail`   | HUD overlay effect                |
@@ -120,6 +120,7 @@ Relay credentials are generated per server instance, saved in a `0600` discovery
 ## Notes
 
 - Coordinates are viewport coordinates in the target tab.
+- Long actions (`captureVideo`, `getConsoleLogs`, animated typing, batches) get a longer wait automatically, up to 120 s; one that cannot fit in 120 s is refused at once, so split it. `Native Messaging request timed out after <N>ms` means Chrome did not answer; an IPC timeout from the client means the host is stuck, so run `npm run watchdog`.
 - Restricted pages (`chrome://`) may not show the visual overlay.
 - **Secrets:** Do not pass passwords, tokens, recovery material, or other secrets to `chrome_fill` or animated `chrome_type_text`. The current content script echoes inserted text into its in-page action feed, and `chrome_fill` returns the text in its result. Prefer the site's/password manager's own autofill flow. Otherwise stop and implement a secret-safe path that neither renders nor returns the value. Reload the target page immediately if a secret is ever inserted through the unsafe path.
 - If `chrome_evaluate` or another CDP-backed action fails with `Cannot access a chrome-extension:// URL of different extension`, do not treat that alone as a Native Messaging outage and do not enable the network relay. Re-run `chrome_controller_health`, then use the content-script path (`chrome_snapshot_elements`, `chrome_click`, and `chrome_get_page_errors`) when those calls still succeed. Use `chrome_fill` only for non-secret text. This can occur when another extension owns the debugger or page attachment even though ordinary tab-scoped controls remain safe and functional.
