@@ -13,6 +13,7 @@ import { Type } from 'typebox';
 import fs from 'node:fs';
 import { assertValidIpcTimeout, describeIpcFailure, IpcError, sendIpcRequest, type IpcResponse } from './ipc-client.js';
 import { getSocketPath } from './native-host.js';
+import { HEALTH_CHROME_WAIT_MS, ipcClientTimeoutMs, withChromeWait } from './chrome-wait.js';
 import {
   normalizeInstanceName,
   readDiscovery,
@@ -78,12 +79,20 @@ function textResult(value: unknown) {
   };
 }
 
-const DEFAULT_IPC_TIMEOUT_MS = 10000;
-
 export type ChromeControllerPiOptions = {
-  /** How long to wait for the native host to answer one IPC request. */
+  /**
+   * Fixed wait for the native host's answer to every IPC request. Leave unset:
+   * by default each request waits past the host's own deadline for it (see
+   * chrome-wait.ts), and a shorter wait replaces the host's definitive answer
+   * with an ambiguous NATIVE_IPC_TIMEOUT.
+   */
   ipcTimeoutMs?: number;
 };
+
+/** The wait for the host's answer to `payload`: the fixed override, else derived from the host's deadline. */
+function ipcWaitMs(payload: Record<string, unknown>, override: number | undefined): number {
+  return override ?? ipcClientTimeoutMs(typeof payload.action === 'string' ? payload.action : '', payload);
+}
 
 /** CHROME_CONTROLLER_URL also enables the relay, but it skips IPC before this is consulted. */
 function relayAllowed(): boolean {
@@ -100,13 +109,13 @@ const RELAY_HINT = 'set CHROME_CONTROLLER_ALLOW_RELAY=1 or CHROME_CONTROLLER_URL
  */
 async function tryIpc(
   payload: Record<string, unknown>,
-  ipcTimeoutMs: number,
+  ipcTimeoutMs: number | undefined,
   signal: AbortSignal | undefined,
 ): Promise<IpcResponse | undefined> {
   if (process.env.CHROME_CONTROLLER_URL) return undefined;
   const socketPath = getSocketPath();
   try {
-    return await sendIpcRequest(socketPath, payload, ipcTimeoutMs, signal);
+    return await sendIpcRequest(socketPath, payload, ipcWaitMs(payload, ipcTimeoutMs), signal);
   } catch (ipcErr) {
     // An abort is the caller's decision, not a transport failure.
     if (!(ipcErr instanceof IpcError)) throw ipcErr;
@@ -120,11 +129,13 @@ async function tryIpc(
 }
 
 async function chromeRequest(
-  payload: ChromeAction | Record<string, unknown>,
+  request: ChromeAction | Record<string, unknown>,
   signal: AbortSignal | undefined,
-  ipcTimeoutMs: number,
+  ipcTimeoutMs: number | undefined,
 ): Promise<ChromeResponse> {
-  const ipcResponse = await tryIpc(payload as Record<string, unknown>, ipcTimeoutMs, signal);
+  // Carries the host's wait on the wire, so the relay budgets it the same way.
+  const payload = withChromeWait(typeof request.action === 'string' ? request.action : '', request);
+  const ipcResponse = await tryIpc(payload, ipcTimeoutMs, signal);
   if (ipcResponse) return ipcResponse;
 
   const relay = relayConfig();
@@ -149,10 +160,11 @@ async function chromeRequest(
  * answers hostPing locally, so this separates "extension not connected" from
  * "host locked or quarantined". Returns nothing if the ping itself fails.
  */
-async function hostState(ipcTimeoutMs: number, signal: AbortSignal | undefined): Promise<Record<string, unknown>> {
+async function hostState(ipcTimeoutMs: number | undefined, signal: AbortSignal | undefined): Promise<Record<string, unknown>> {
   let pong: IpcResponse;
   try {
-    pong = await sendIpcRequest(getSocketPath(), { action: 'hostPing' }, ipcTimeoutMs, signal);
+    const ping = { action: 'hostPing' };
+    pong = await sendIpcRequest(getSocketPath(), ping, ipcWaitMs(ping, ipcTimeoutMs), signal);
   } catch {
     return {};
   }
@@ -165,8 +177,9 @@ async function hostState(ipcTimeoutMs: number, signal: AbortSignal | undefined):
   };
 }
 
-async function chromeHealth(signal: AbortSignal | undefined, ipcTimeoutMs: number): Promise<ChromeResponse> {
-  const ipcResponse = await tryIpc({ action: 'queryTabs' }, ipcTimeoutMs, signal);
+async function chromeHealth(signal: AbortSignal | undefined, ipcTimeoutMs: number | undefined): Promise<ChromeResponse> {
+  // A short Chrome wait, so a silent Chrome is reported well before an ordinary command gives up.
+  const ipcResponse = await tryIpc({ action: 'queryTabs', timeoutMs: HEALTH_CHROME_WAIT_MS }, ipcTimeoutMs, signal);
   if (ipcResponse) {
     // The host answered, so IPC is the live transport; a refusal describes
     // its Chrome side and says nothing about the relay.
@@ -202,8 +215,8 @@ function debuggerBatch(tabId: number, actions: ChromeAction[]) {
 }
 
 export default function chromeControllerPiExtension(pi: ExtensionAPI, options: ChromeControllerPiOptions = {}): void {
-  const ipcTimeoutMs = options.ipcTimeoutMs ?? DEFAULT_IPC_TIMEOUT_MS;
-  assertValidIpcTimeout(ipcTimeoutMs);
+  const ipcTimeoutMs = options.ipcTimeoutMs;
+  if (ipcTimeoutMs !== undefined) assertValidIpcTimeout(ipcTimeoutMs);
   const request = (payload: ChromeAction | Record<string, unknown>, signal?: AbortSignal) =>
     chromeRequest(payload, signal, ipcTimeoutMs);
   const health = (signal?: AbortSignal) => chromeHealth(signal, ipcTimeoutMs);
@@ -813,7 +826,6 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI, options: C
             action: 'getConsoleLogs',
             tabId: params.tabId,
             timeoutMs: params.timeoutMs ?? 2000,
-            requestTimeoutMs: (params.timeoutMs ?? 2000) + 5000,
           },
           signal
         )

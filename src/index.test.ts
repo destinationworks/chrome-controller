@@ -10,6 +10,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import chromeControllerPiExtension from './index.ts';
+import { setEnv, startScriptedChrome } from '../test/scripted-chrome.ts';
 
 const TEST_API_KEY = 'test-key-0123456789abcdef01234567';
 const originalRelayUrl = process.env.CHROME_CONTROLLER_URL;
@@ -262,6 +263,34 @@ test('chrome_batch sends raw actions payload', async () => {
   global.fetch = originalFetch;
 });
 
+test('chrome_batch over the relay gives an item with work of its own its own wait', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+
+  let sentPayload: unknown;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return { ok: true, json: async () => ({ success: true, results: [] }) } as Response;
+  };
+  try {
+    await pi.tools['chrome_batch'].execute(
+      'call_1',
+      { mode: 'sequential', actions: [{ action: 'getConsoleLogs', tabId: 1, timeoutMs: 300 }, { action: 'queryTabs' }] },
+      undefined,
+    );
+    // The relay waits on each item separately: without its own wait, it would
+    // read the 300 ms collection window as the item's wait and time it out.
+    const p = sentPayload as { actions: Array<Record<string, unknown>> };
+    assert.deepEqual(p.actions, [
+      { action: 'getConsoleLogs', tabId: 1, timeoutMs: 300, requestTimeoutMs: 15300 },
+      { action: 'queryTabs' },
+    ]);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test('chrome_create_tab sends correct payload', async () => {
   const pi = makeMockPi();
   chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
@@ -485,7 +514,8 @@ test('chrome_console_logs sends getConsoleLogs', async () => {
   const p = sentPayload as { action: string; timeoutMs: number; requestTimeoutMs: number };
   assert.equal(p.action, 'getConsoleLogs');
   assert.equal(p.timeoutMs, 3000);
-  assert.equal(p.requestTimeoutMs, 8000);
+  // The relay's wait: one ordinary round trip on top of the collection window.
+  assert.equal(p.requestTimeoutMs, 18000);
 
   global.fetch = originalFetch;
 });
@@ -760,7 +790,73 @@ test('chrome_console_logs uses default timeout', async () => {
   await pi.tools['chrome_console_logs'].execute('call_1', { tabId: 1 }, undefined);
   const p = sentPayload as { timeoutMs: number; requestTimeoutMs: number };
   assert.equal(p.timeoutMs, 2000);
-  assert.equal(p.requestTimeoutMs, 7000);
+  assert.equal(p.requestTimeoutMs, 17000);
 
   global.fetch = originalFetch;
 });
+
+// ── IPC client wait vs. the host's Chrome wait ──────────────────────────────
+
+function nativeIpcEnv(socketPath: string): () => void {
+  // An explicit relay URL skips Native Messaging, and relay permission must not mask a failure.
+  return setEnv({
+    CHROME_CONTROLLER_URL: undefined,
+    CHROME_CONTROLLER_ALLOW_RELAY: undefined,
+    HTTP_PORT: undefined,
+    CHROME_CONTROLLER_SOCKET: socketPath,
+  });
+}
+
+test('pi: a healthy host delivers its own Chrome timeout before the IPC client gives up', async (t) => {
+  if (process.platform === 'win32') return;
+  const chrome = await startScriptedChrome('pi-wait-order-');
+  t.after(() => chrome.close());
+  t.after(nativeIpcEnv(chrome.socketPath));
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const outcome = pi.tools['chrome_query_tabs'].execute('call_1', {}, undefined)
+    .then((result) => JSON.stringify(result), (error: Error) => error.message);
+  await chrome.nextRequest(); // Chrome has the request and never answers.
+  t.mock.timers.tick(15000); // the host's default Chrome wait
+  const text = await outcome;
+  assert.match(text, /Native Messaging request timed out after 15000ms/);
+  assert.doesNotMatch(text, /NATIVE_IPC_TIMEOUT/);
+});
+
+test('pi: console logs collected for the whole window reach the caller over Native Messaging', async (t) => {
+  if (process.platform === 'win32') return;
+  const chrome = await startScriptedChrome('pi-console-window-');
+  t.after(() => chrome.close());
+  t.after(nativeIpcEnv(chrome.socketPath));
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const outcome = pi.tools['chrome_console_logs'].execute('call_1', { tabId: 1 }, undefined);
+  const request = await chrome.nextRequest();
+  assert.equal(request.timeoutMs, 2000, 'the collection window still reaches the extension');
+  // Measured on a live Chrome: the extension answers 2007ms after the request.
+  t.mock.timers.tick(2007);
+  chrome.answer(request.id, { logs: [], count: 0 });
+  const result = await outcome as { details: { success?: boolean; result?: unknown; error?: string } };
+  assert.equal(result.details.error, undefined);
+  assert.deepEqual(result.details.result, { logs: [], count: 0 });
+});
+
+test('pi: a 22 s capture measured on a live Chrome reaches the caller', async (t) => {
+  if (process.platform === 'win32') return;
+  const chrome = await startScriptedChrome('pi-capture-');
+  t.after(() => chrome.close());
+  t.after(nativeIpcEnv(chrome.socketPath));
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const outcome = pi.tools['chrome_capture_video'].execute('call_1', { tabId: 1, fps: 30, duration: 2 }, undefined);
+  const request = await chrome.nextRequest();
+  t.mock.timers.tick(21968);
+  chrome.answer(request.id, { count: 60 });
+  const result = await outcome as { details: { result?: unknown; error?: string } };
+  assert.equal(result.details.error, undefined);
+  assert.deepEqual(result.details.result, { count: 60 });
+});
+

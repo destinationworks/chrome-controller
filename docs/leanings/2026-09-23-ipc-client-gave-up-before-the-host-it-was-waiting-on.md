@@ -1,0 +1,57 @@
+# 2026-09-23 — The IPC client gave up before the host it was waiting on, and the host before the Chrome it was waiting on
+
+- **Status:** Resolved
+- **Task/context:** Timeout ordering between the MCP client (`src/mcp.ts` `sendCommand`), the pi client (`src/index.ts` `sendIpcRequest`), the native host (`src/native-host.ts` `requestFromChrome`), and the extension's own action durations (`Chrome Extension/background.js`). Follows the wedge learning `2026-09-23-wedged-native-host-swallows-sigterm-and-needs-external-liveness-probe.md`, which fixed the same ordering for the health tool only.
+- **Unexpected observation or failure:**
+  - Both clients waited 10 s for the host, and the host waited 15 s for Chrome. For every ordinary command, a slow Chrome produced the client's ambiguous `IPC timeout` ("wedged host or slow Chrome?") while a healthy host was 5 s from delivering its definitive `Native Messaging request timed out after 15000ms`.
+  - `getConsoleLogs` over Native Messaging failed every time. On that action `timeoutMs` is the extension's collection window, but the host used it as its own wait for Chrome. The extension answers only after the window closes, so the host always gave up first. The pi client already sent `requestTimeoutMs: window + 5000`, but only the relay honoured that key; the host ignored it.
+  - Actions with working time of their own (video capture, animated typing, batches) outran both fixed waits.
+- **Evidence:** Direct IPC requests to the live host with Chrome connected, against an `https://example.com` tab in the managed group:
+  - `getConsoleLogs` with a 2000 ms window: `Native Messaging request timed out after 2000ms` at 2006 ms. Adding `requestTimeoutMs: 7000` gave the same result at 2007 ms.
+  - `captureVideo` took 8150 ms at its defaults (5 fps, 3 s, jpeg), 11016 ms as png, 11406 ms at 10 fps for 3 s, and 21968 ms at 30 fps for 2 s. That is 283-548 ms of `Page.captureScreenshot` latency per frame on top of the nominal interval.
+  - Animated `Input.insertText` of 52 characters took 10423 ms at a 50 ms delay and 7902 ms at 12 ms: about 130 ms per keystroke beyond the extension's own sleeps.
+  - Before the fix, the new regression tests failed with exactly these messages. They drive a real host with a scripted Chrome (`test/scripted-chrome.ts`), with the host's and the client's timers on `node:test` mock timers.
+- **Approaches tried:**
+  - **Attempt:** Lower the host's default wait below the clients' 10 s.
+    - **Outcome:** Did not work
+    - **Why:** It trades one wrong answer for another: every ordinary command gets less time on a slow Chrome, and long actions still fail. The host's wait has to follow the action, not a constant.
+  - **Attempt:** Raise the client timeout to a larger constant.
+    - **Outcome:** Did not work
+    - **Why:** The ordering holds only until the next constant changes (the health tool already had a hand-kept 8000/12000 pair), and a constant cannot cover a 22 s capture without also delaying every wedge report.
+  - **Attempt:** Derive the client timeout from the host's effective wait, and derive that wait from the action's own working time, in one module used by the host and both clients (`src/chrome-wait.ts`).
+    - **Outcome:** Worked
+    - **Why:** The client's wait is always the host's deadline plus a 2 s delivery margin, so the ordering holds by construction. The per-action work mirrors the extension's loops and defaults. A virtual-clock test runs the real extension worker with Chrome latency set to the budget's allowances and requires its elapsed time to fit, so drift in either file fails a test.
+  - **Attempt:** Have each client add `requestTimeoutMs` only for its own long tools.
+    - **Outcome:** Partial
+    - **Why:** It covers only the tools a client knows about (not `chrome_batch` items or raw IPC callers), and the host still ignored the key. The final version has the host compute the wait itself. Clients also send the wait on the wire (`withChromeWait`), but only for actions with work of their own, so the relay, whose default is shorter, budgets them the same way. Ordinary requests go out unchanged.
+  - **Attempt:** First version, before an adversarial review of the tests.
+    - **Outcome:** Partial
+    - **Why:** The review found four gaps, each reproduced with a failing test before it was fixed:
+      - Reading an answer re-scanned the accumulated text on every chunk, so time grew with the square of the size. A 30 MB answer arriving at once still hit the client timeout; pi waited its full 17 s. Both clients now read through the shared `src/ipc-client.ts` (#7), which keeps the chunks and searches only the newest; a separate `src/ipc-line.ts` reader written for the same fix was dropped when this work was rebased onto it.
+      - The relay splits a batch and waits per item, so the wait stamped on the batch never reached its items. `withChromeWait` now stamps each item that has work of its own; a test against the real relay covers it.
+      - An action that cannot finish within the 120 s cap even on an instant Chrome waited out the cap, while the extension kept working (typing retried after that point would type twice). Such requests are now refused at once, by the client before sending and by the host before forwarding.
+      - A 1 ms delivery margin and a zero per-batch-item allowance both survived the tests; the 30 MB test and a 40-action virtual-clock batch now kill them. Tautological ordering tests were replaced with end-to-end ones.
+- **Root cause:** Three clocks with one ordering requirement were set independently: 10 s in each client, 15 s in the host, and the action's duration in the extension. On top of that, the overloaded `timeoutMs` key meant "wait" to the host and "collection window" to the extension.
+- **Resolution:**
+  - Added `src/chrome-wait.ts` with `chromeWorkMs`, `chromeWaitMs`, `ipcClientTimeoutMs` and `withChromeWait`. The host's wait is `requestTimeoutMs` if set, else `timeoutMs` except on `getConsoleLogs`, else 15 s plus the action's work, capped at 120 s and rounded up to an integer.
+  - Each budget allowance is about twice the worst latency measured: 1000 ms per captured frame, 300 ms per keystroke, 1000 ms per batch item. Guarded secret actions get two ordinary round trips (the page action, then the tab close on failure).
+  - The host's `requestFromChrome`, MCP's `sendCommand` and pi's `tryIpc`/`chromeRequest` use it; both clients send through the shared `src/ipc-client.ts`.
+  - Removed `HEALTH_IPC_CLIENT_TIMEOUT_MS` and pi's ad-hoc `window + 5000`. The clients' fixed timeout overrides (MCP `sendCommand`'s optional third parameter, pi's `ipcTimeoutMs` option) remain for transport tests only; no tool passes them.
+  - Two waits stay fixed on purpose: `hostPing`, which the host answers without Chrome, waits `HOST_LOCAL_WAIT_MS` (3 s, as the watchdog probe), and both clients' health checks ask Chrome with `HEALTH_CHROME_WAIT_MS` (8 s).
+  - A batch item's explicit wait counts toward the batch's budget, because the relay would let that item run that long; `getConsoleLogs` is always stamped, because the relay would otherwise read its collection window as its wait.
+- **Verification:**
+  - `npm test`, `npm run typecheck` and `npm run lint` pass.
+  - Hand mutations were each caught by at least one test: a single guarded round trip, a zero or 1 ms margin, the console window used as the wait, an extension fps default drift, a missing round-up, no relay stamping, no per-item stamping, no fail-fast, a zero batch-item allowance, typing without its pause, and a re-scanning line reader (against the dropped `ipc-line.ts`; after the rebase, main's multi-MB tests in `src/index-ipc.test.ts` and `src/mcp.test.ts` cover the shared reader).
+  - Live timings above are pinned as regression data in `src/mcp.test.ts` and `src/chrome-wait.test.ts`.
+  - Live check with the built client against the running host, which is still the previous build (so a new client with an old host): `captureVideo` at 30 fps for 2 s returned 60 frames after 12578 ms, past the old client's 10 s limit. An ordinary `queryTabs` was unchanged at 5 ms. The new host itself could not be exercised live without re-registering the installed host.
+- **Prevention/follow-up:**
+  - Rule promoted to `AGENTS.md`.
+  - Trade-off accepted: a wedged host now surfaces after 17 s for an ordinary command (was 10 s), and proportionally later for long actions. MCP's `chrome_controller_health` and `npm run watchdog` still detect it within 3 s; pi's health check reports it after its 8 s health wait plus the 2 s margin. A concurrent `hostPing` during long waits would restore fast wedge detection and remains a possible follow-up.
+  - Found in passing and left out of scope:
+    - The MCP client's relay path returns `parsed.result`, but the relay's batch response has no `result` field, so MCP `chrome_batch` over the relay returns `undefined` even on success.
+    - The wall-clock test `IPC flood must not stall concurrent requests` failed once when two test suites ran concurrently and passed alone; it may be flaky on shared CI runners.
+    - The extension's batch allowlist rejects `sendCommand`, so `chrome_type_text` and `chrome_mouse` fail (`Batch item 1 specifies disallowed action "sendCommand"`).
+    - Pi's `chrome_batch` sends no `action` field.
+  - The host change takes effect only after rebuilding and restarting the host (re-enable the extension).
+- **Reusable learning:** When a request crosses several waiting parties, derive each party's timeout from the next one's in a single module. Never keep parallel constants. Give each action its own working time, and never let one parameter mean both "how long to work" and "how long to wait".
+- **References:** `src/chrome-wait.ts`, `src/chrome-wait.test.ts`, `src/ipc-client.ts`, `test/scripted-chrome.ts`; regression tests at the end of `src/mcp.test.ts`, `src/index.test.ts`, `src/native-host.test.ts` and `src/extension-background.test.ts`.

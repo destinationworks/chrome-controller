@@ -1,6 +1,7 @@
 import { WebSocket, WebSocketServer } from 'ws';
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import { MAX_CHROME_WAIT_MS } from './chrome-wait.js';
 import {
   DISCOVERY_DIR,
   DiscoveryInfo,
@@ -33,7 +34,8 @@ export const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 export const DEFAULT_TIMEOUT_MS = 10000;
 export const DEFAULT_MAX_BATCH_ACTIONS = 50;
 const MAX_CONFIGURED_BODY_BYTES = 100 * 1024 * 1024;
-const MAX_REQUEST_TIMEOUT_MS = 120000;
+// The relay's cap on one request's wait is the native host's.
+const MAX_REQUEST_TIMEOUT_MS = MAX_CHROME_WAIT_MS;
 const MAX_CONFIGURED_BATCH_ACTIONS = 1000;
 
 function boundedInteger(value: unknown, label: string, minimum: number, maximum: number): number {

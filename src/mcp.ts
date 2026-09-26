@@ -7,6 +7,7 @@
 import http from 'node:http';
 import { describeIpcFailure, IpcError as TransportIpcError, sendIpcRequest, type IpcResponse } from './ipc-client.js';
 import { getSocketPath } from './native-host.js';
+import { HEALTH_CHROME_WAIT_MS, HOST_LOCAL_WAIT_MS, ipcClientTimeoutMs, withChromeWait } from './chrome-wait.js';
 import { probeHost, type ProbeResult, type HostState } from './watchdog.js';
 import {
   normalizeInstanceName,
@@ -61,12 +62,11 @@ export function getConfig(): { httpPort: number; apiKey: string } {
   throw new Error('RELAY_CONFIG_UNAVAILABLE: no private Chrome Controller discovery file or explicit API_KEY is available');
 }
 
-export const HEALTH_PROBE_TIMEOUT_MS = 3000;
-/** The host's wait for Chrome. Must stay strictly below the IPC client timeout
- *  so the host's definitive "Chrome did not answer" wins the race, instead of
- *  the client's ambiguous "IPC timeout". */
-export const HEALTH_CHROME_WAIT_MS = 8000;
-export const HEALTH_IPC_CLIENT_TIMEOUT_MS = 12000;
+export const HEALTH_PROBE_TIMEOUT_MS = HOST_LOCAL_WAIT_MS;
+/** The host's wait for Chrome during a health check. The IPC client's wait is
+ *  derived from it (see chrome-wait.ts), so the host's definitive "Chrome did
+ *  not answer" always wins the race against the client's ambiguous timeout. */
+export { HEALTH_CHROME_WAIT_MS };
 
 /**
  * Builds the health report. A wedged host keeps its socket bound and answers
@@ -187,17 +187,25 @@ async function tryIpc(
   }
 }
 
+/**
+ * Sends one command to Chrome over Native Messaging IPC, or the relay when
+ * enabled. The IPC wait is derived from the host's own deadline for this
+ * request. `ipcTimeoutMs` overrides it only for tests of the transport itself:
+ * a shorter client wait is exactly what replaces the host's definitive answer
+ * with an ambiguous NATIVE_IPC_TIMEOUT, so tools never pass it.
+ */
 export async function sendCommand(
   action: string,
-  params: Record<string, unknown> = {},
-  ipcTimeoutMs = 10000,
+  requestParams: Record<string, unknown> = {},
+  ipcTimeoutMs?: number,
 ): Promise<unknown> {
+  const params = withChromeWait(action, requestParams);
   const allowRelay = process.env.CHROME_CONTROLLER_ALLOW_RELAY === '1' || Boolean(process.env.HTTP_PORT);
   const nativeOnly = action === 'extractSecretGuarded' || action === 'injectSecretGuarded' || params.sensitive === true;
   const socketPath = getSocketPath();
 
   if (!process.env.HTTP_PORT || nativeOnly) {
-    const answer = await tryIpc(socketPath, { action, ...params }, ipcTimeoutMs, allowRelay && !nativeOnly, nativeOnly);
+    const answer = await tryIpc(socketPath, { action, ...params }, ipcTimeoutMs ?? ipcClientTimeoutMs(action, params), allowRelay && !nativeOnly, nativeOnly);
     if (answer) return unwrapHostAnswer(answer, socketPath);
   }
 
@@ -515,7 +523,7 @@ async function main(): Promise<void> {
       if (toolName === 'chrome_controller_health') {
         const report = await buildHealthReport(
           () => probeHost(getSocketPath(), HEALTH_PROBE_TIMEOUT_MS),
-          () => sendCommand('queryTabs', { timeoutMs: HEALTH_CHROME_WAIT_MS }, HEALTH_IPC_CLIENT_TIMEOUT_MS),
+          () => sendCommand('queryTabs', { timeoutMs: HEALTH_CHROME_WAIT_MS }),
         );
         return { content: [{ type: 'text', text: JSON.stringify(report, null, 2) }] };
       }

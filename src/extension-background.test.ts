@@ -4,6 +4,13 @@ import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
+import {
+  DEFAULT_CHROME_WAIT_MS,
+  FRAME_CAPTURE_ALLOWANCE_MS,
+  KEYSTROKE_ALLOWANCE_MS,
+  chromeWaitMs,
+  chromeWorkMs,
+} from './chrome-wait.js';
 
 const TEST_API_KEY = 'test-key-0123456789abcdef01234567';
 const backgroundPath = path.join(
@@ -36,9 +43,12 @@ function clone<T>(value: T): T {
 function createWorker(
   sharedStorage: Map<string, unknown>,
   options: {
-    debuggerSendCommand?: () => Promise<unknown>;
+    debuggerSendCommand?: (target: unknown, method: string, params?: unknown) => Promise<unknown>;
+    tabsSendMessage?: (tabId: number, message: Record<string, unknown>) => Promise<unknown>;
     now?: () => number;
     storageReadsFailing?: boolean;
+    timers?: { setTimeout: (fn: () => void, ms?: number) => unknown; clearTimeout: (id: unknown) => void };
+    math?: Math;
   } = {},
 ) {
   const nativeMessages: Record<string, unknown>[] = [];
@@ -123,7 +133,9 @@ function createWorker(
       onRemoved: tabRemoved,
       async query() { queryTabsCalls += 1; return []; },
       async get(tabId: number) { return { id: tabId, windowId: 1, title: '', url: '', active: true }; },
-      async sendMessage() { return {}; },
+      async sendMessage(tabId: number, message: Record<string, unknown>) {
+        return options.tabsSendMessage ? options.tabsSendMessage(tabId, message) : {};
+      },
       async group() { return 1; },
       async remove() { removeTabCalls += 1; },
       async update() { return {}; },
@@ -139,9 +151,9 @@ function createWorker(
       onEvent: debuggerOnEvent,
       async attach() {},
       async detach() {},
-      async sendCommand() {
+      async sendCommand(target: unknown, method: string, params?: unknown) {
         debuggerSendCalls += 1;
-        return options.debuggerSendCommand ? options.debuggerSendCommand() : {};
+        return options.debuggerSendCommand ? options.debuggerSendCommand(target, method, params) : {};
       },
     },
   };
@@ -157,10 +169,11 @@ function createWorker(
     TextEncoder,
     URL,
     console: { log() {}, warn() {}, error() {} },
-    setTimeout,
-    clearTimeout,
+    setTimeout: options.timers?.setTimeout ?? setTimeout,
+    clearTimeout: options.timers?.clearTimeout ?? clearTimeout,
     queueMicrotask,
     structuredClone,
+    ...(options.math ? { Math: options.math } : {}),
   });
   vm.runInContext(backgroundSource, context, { filename: backgroundPath });
 
@@ -463,4 +476,189 @@ test('relay rotation invalidates the old transport before connecting with the ne
   const rotatedUrl = new URL(worker.sockets[1].url);
   assert.equal(rotatedUrl.port, '43113');
   assert.equal(rotatedUrl.searchParams.get('key'), rotatedKey);
+});
+
+// ── Working time of long actions vs. the shared timeout budget ─────────────
+//
+// chrome-wait.ts mirrors the extension's defaults and loops to size the host's
+// wait. These run the real worker on a virtual clock, with Chrome's latency set
+// to the most the budget allows, to hold the two together: if the extension's
+// loops or defaults change, the budget must change with them.
+
+/**
+ * A virtual clock for the worker's setTimeout. Time jumps to the next due timer
+ * only after every promise chain started so far has settled, so `run` measures
+ * exactly the worker's own sleeps plus the injected Chrome latencies.
+ */
+function virtualClock() {
+  let now = 0;
+  let nextId = 0;
+  const due = new Map<number, { at: number; fn: () => void }>();
+  const setTimer = (fn: () => void, ms?: number) => {
+    nextId += 1;
+    // Browsers run a NaN or negative delay at once.
+    due.set(nextId, { at: now + Math.max(0, Number(ms) || 0), fn });
+    return nextId;
+  };
+  return {
+    setTimeout: setTimer,
+    clearTimeout(id: unknown) { due.delete(id as number); },
+    /** A Chrome call that answers `value` after `ms` of virtual time. */
+    latency<T>(ms: number, value: T): Promise<T> {
+      return new Promise((resolve) => setTimer(() => resolve(value), ms));
+    },
+    async run(action: Promise<unknown>): Promise<number> {
+      let settled = false;
+      void action.then(() => { settled = true; }, () => { settled = true; });
+      const start = now;
+      for (;;) {
+        await flushWorkerTasks();
+        if (settled) return now - start;
+        let nextKey = 0;
+        let next: { at: number; fn: () => void } | undefined;
+        for (const [key, timer] of due) {
+          if (!next || timer.at < next.at) { next = timer; nextKey = key; }
+        }
+        if (!next) throw new Error('the worker went idle without answering');
+        due.delete(nextKey);
+        now = next.at;
+        next.fn();
+      }
+    },
+  };
+}
+
+async function timeNativeAction(
+  clock: ReturnType<typeof virtualClock>,
+  worker: ReturnType<typeof createWorker>,
+  request: Record<string, unknown>,
+): Promise<{ elapsed: number; response: Record<string, any> | undefined }> {
+  await flushWorkerTasks();
+  const elapsed = await clock.run(worker.nativeOnMessage.emit(request));
+  return { elapsed, response: worker.nativeMessages.find((message) => message.id === request.id) };
+}
+
+test('captureVideo at the slowest frame the budget allows finishes within its budgeted work', async () => {
+  for (const params of [{}, { fps: 10, duration: 3 }, { fps: 30, duration: 2 }]) {
+    const clock = virtualClock();
+    const worker = createWorker(new Map(), {
+      timers: clock,
+      debuggerSendCommand: (_target, method) => method === 'Page.captureScreenshot'
+        ? clock.latency(FRAME_CAPTURE_ALLOWANCE_MS, { data: 'frame' })
+        : Promise.resolve({}),
+    });
+    const request = { id: 1, action: 'captureVideo', tabId: 42, ...params };
+    const { elapsed, response } = await timeNativeAction(clock, worker, request);
+    const work = chromeWorkMs('captureVideo', request);
+    const label = JSON.stringify(params);
+    assert.equal(response?.error, undefined, label);
+    assert.ok(response?.result.count > 0, `${label}: frames were captured`);
+    assert.equal(response?.result.frames.filter((frame: { error?: string }) => frame.error).length, 0, label);
+    assert.ok(elapsed <= work, `${label}: took ${elapsed}ms, budgeted ${work}ms`);
+    // Tight, not vacuous: only the interval after the last frame goes unspent.
+    const intervalMs = Math.round(1000 / response?.result.fps);
+    assert.equal(elapsed, work - intervalMs, `${label}: worst case realized`);
+  }
+});
+
+test('getConsoleLogs answers only after its whole window, so the window alone can never be the wait', async () => {
+  for (const params of [{}, { timeoutMs: 3000 }]) {
+    const attachLatencyMs = 1000;
+    const clock = virtualClock();
+    const worker = createWorker(new Map(), {
+      timers: clock,
+      debuggerSendCommand: (_target, method) => method === 'Runtime.enable'
+        ? clock.latency(attachLatencyMs, {})
+        : Promise.resolve({}),
+    });
+    const request = { id: 1, action: 'getConsoleLogs', tabId: 42, ...params };
+    const { elapsed, response } = await timeNativeAction(clock, worker, request);
+    const label = JSON.stringify(params);
+    assert.deepEqual(response?.result, { logs: [], count: 0 }, label);
+    assert.equal(elapsed, chromeWorkMs('getConsoleLogs', request) + attachLatencyMs, `${label}: window plus setup`);
+    // What the host used to wait: the window itself, which always loses.
+    assert.ok(elapsed > Number(params.timeoutMs ?? 2000), label);
+    assert.ok(elapsed < chromeWaitMs('getConsoleLogs', request), `${label}: the host now outwaits it`);
+  }
+});
+
+test('animated typing at the slowest keystroke the budget allows finishes within its budgeted work', async () => {
+  // Every key a pause key, and Math.random at its maximum: the extension's worst case.
+  const text = ',.!?;: '.repeat(6);
+  for (const typingDelayMs of [undefined, 12, 50, 240]) {
+    const clock = virtualClock();
+    const math = Object.create(Math) as Math;
+    math.random = () => 1 - Number.EPSILON;
+    const halfKeystroke = KEYSTROKE_ALLOWANCE_MS / 2;
+    const worker = createWorker(new Map(), {
+      timers: clock,
+      math,
+      debuggerSendCommand: (_target, method) => method === 'Input.insertText'
+        ? clock.latency(halfKeystroke, {})
+        : Promise.resolve({}),
+      tabsSendMessage: (_tabId, message) => message.action === 'visualizeAction'
+        ? clock.latency(halfKeystroke, {})
+        : Promise.resolve({}),
+    });
+    const request = {
+      id: 1,
+      action: 'sendCommand',
+      tabId: 42,
+      method: 'Input.insertText',
+      commandParams: { text, animateTyping: true, typingDelayMs, sound: false },
+    };
+    const { elapsed, response } = await timeNativeAction(clock, worker, request);
+    const work = chromeWorkMs('sendCommand', request);
+    const label = `typingDelayMs ${String(typingDelayMs)}`;
+    assert.equal(response?.error, undefined, label);
+    assert.equal(elapsed, work, `${label}: took ${elapsed}ms, budgeted ${work}ms`);
+  }
+});
+
+test('a batch of long actions finishes within its budgeted work in either mode', async () => {
+  for (const mode of ['sequential', 'parallel']) {
+    const clock = virtualClock();
+    const worker = createWorker(new Map(), {
+      timers: clock,
+      debuggerSendCommand: (_target, method) => method === 'Page.captureScreenshot'
+        ? clock.latency(FRAME_CAPTURE_ALLOWANCE_MS, { data: 'frame' })
+        : Promise.resolve({}),
+    });
+    const request = {
+      id: 1,
+      action: 'batch',
+      mode,
+      actions: [
+        { action: 'captureVideo', tabId: 42 },
+        { action: 'getConsoleLogs', tabId: 42, timeoutMs: 3000 },
+      ],
+    };
+    const { elapsed, response } = await timeNativeAction(clock, worker, request);
+    assert.equal(response?.result.success, true, mode);
+    const work = chromeWorkMs('batch', request);
+    assert.ok(elapsed <= work, `${mode}: took ${elapsed}ms, budgeted ${work}ms`);
+    assert.ok(elapsed < DEFAULT_CHROME_WAIT_MS + work, mode);
+  }
+});
+
+test('a batch of 40 ordinary actions at measured latency fits its per-item allowance', async () => {
+  // ~450 ms per ordinary action was measured on a live Chrome, so 40 of them
+  // take 18 s: more than one ordinary 15 s round trip.
+  const measuredActionMs = 450;
+  const clock = virtualClock();
+  const worker = createWorker(new Map(), {
+    timers: clock,
+    debuggerSendCommand: () => clock.latency(measuredActionMs, { data: 'png' }),
+  });
+  const request = {
+    id: 1,
+    action: 'batch',
+    mode: 'sequential',
+    actions: Array.from({ length: 40 }, () => ({ action: 'captureScreenshot', tabId: 42 })),
+  };
+  const { elapsed, response } = await timeNativeAction(clock, worker, request);
+  assert.equal(response?.result.success, true);
+  assert.equal(elapsed, 40 * measuredActionMs);
+  assert.ok(elapsed > DEFAULT_CHROME_WAIT_MS, 'the ordinary wait alone would not cover it');
+  assert.ok(elapsed < chromeWaitMs('batch', request), `took ${elapsed}ms, host waits ${chromeWaitMs('batch', request)}ms`);
 });
