@@ -7,6 +7,7 @@
 import http from 'node:http';
 import { describeIpcFailure, IpcError as TransportIpcError, sendIpcRequest, type IpcResponse } from './ipc-client.js';
 import { getSocketPath } from './native-host.js';
+import { HEALTH_CHROME_WAIT_MS, HOST_LOCAL_WAIT_MS, ipcClientTimeoutMs, withChromeWait } from './chrome-wait.js';
 import { probeHost, type ProbeResult, type HostState } from './watchdog.js';
 import {
   normalizeInstanceName,
@@ -61,12 +62,11 @@ export function getConfig(): { httpPort: number; apiKey: string } {
   throw new Error('RELAY_CONFIG_UNAVAILABLE: no private Chrome Controller discovery file or explicit API_KEY is available');
 }
 
-export const HEALTH_PROBE_TIMEOUT_MS = 3000;
-/** The host's wait for Chrome. Must stay strictly below the IPC client timeout
- *  so the host's definitive "Chrome did not answer" wins the race, instead of
- *  the client's ambiguous "IPC timeout". */
-export const HEALTH_CHROME_WAIT_MS = 8000;
-export const HEALTH_IPC_CLIENT_TIMEOUT_MS = 12000;
+export const HEALTH_PROBE_TIMEOUT_MS = HOST_LOCAL_WAIT_MS;
+/** The host's wait for Chrome during a health check. The IPC client's wait is
+ *  derived from it (see chrome-wait.ts), so the host's definitive "Chrome did
+ *  not answer" always wins the race against the client's ambiguous timeout. */
+export { HEALTH_CHROME_WAIT_MS };
 
 /**
  * Builds the health report. A wedged host keeps its socket bound and answers
@@ -187,17 +187,25 @@ async function tryIpc(
   }
 }
 
+/**
+ * Sends one command to Chrome over Native Messaging IPC, or the relay when
+ * enabled. The IPC wait is derived from the host's own deadline for this
+ * request. `ipcTimeoutMs` overrides it only for tests of the transport itself:
+ * a shorter client wait is exactly what replaces the host's definitive answer
+ * with an ambiguous NATIVE_IPC_TIMEOUT, so tools never pass it.
+ */
 export async function sendCommand(
   action: string,
-  params: Record<string, unknown> = {},
-  ipcTimeoutMs = 10000,
+  requestParams: Record<string, unknown> = {},
+  ipcTimeoutMs?: number,
 ): Promise<unknown> {
+  const params = withChromeWait(action, requestParams);
   const allowRelay = process.env.CHROME_CONTROLLER_ALLOW_RELAY === '1' || Boolean(process.env.HTTP_PORT);
   const nativeOnly = action === 'extractSecretGuarded' || action === 'injectSecretGuarded' || params.sensitive === true;
   const socketPath = getSocketPath();
 
   if (!process.env.HTTP_PORT || nativeOnly) {
-    const answer = await tryIpc(socketPath, { action, ...params }, ipcTimeoutMs, allowRelay && !nativeOnly, nativeOnly);
+    const answer = await tryIpc(socketPath, { action, ...params }, ipcTimeoutMs ?? ipcClientTimeoutMs(action, params), allowRelay && !nativeOnly, nativeOnly);
     if (answer) return unwrapHostAnswer(answer, socketPath);
   }
 
@@ -221,8 +229,13 @@ export async function sendCommand(
         res.on('data', (chunk: Buffer) => { body += chunk.toString(); });
         res.on('end', () => {
           try {
-            const parsed = JSON.parse(body) as { success?: boolean; result?: unknown; error?: string };
-            if (res.statusCode === 200 && parsed.success) {
+            const parsed = JSON.parse(body) as { success?: boolean; result?: unknown; error?: string; results?: unknown };
+            // The relay answers a batch with the BatchResult itself, not wrapped in
+            // `result`, and with 207 when an item failed; IPC returns the same
+            // BatchResult as its result. Either way the caller gets it whole.
+            if (action === 'batch' && (res.statusCode === 200 || res.statusCode === 207) && Array.isArray(parsed.results)) {
+              resolve(parsed);
+            } else if (res.statusCode === 200 && parsed.success) {
               resolve(parsed.result);
             } else {
               reject(new Error(parsed.error ?? `HTTP ${res.statusCode}`));
@@ -237,6 +250,52 @@ export async function sendCommand(
     req.write(data);
     req.end();
   });
+}
+
+/** The batch chrome_type_text sends: attach the debugger, then insert the text over CDP. */
+export function buildTypeTextBatch(args: Record<string, unknown>): Record<string, unknown> {
+  return {
+    mode: 'sequential',
+    actions: [
+      { action: 'ensureDebugger', tabId: args.tabId },
+      {
+        action: 'sendCommand',
+        tabId: args.tabId,
+        method: 'Input.insertText',
+        commandParams: {
+          text: args.text,
+          animateTyping: !args.instant,
+          typingDelayMs: args.typingDelayMs ?? 50,
+          sound: args.sound !== false,
+        },
+      },
+    ],
+  };
+}
+
+/** The batch chrome_mouse sends: attach the debugger, then dispatch the mouse events over CDP. */
+export function buildMouseBatch(args: Record<string, unknown>): Record<string, unknown> {
+  const mouseType = (args.type ?? args.action ?? 'click') as string;
+  const button = (args.button as string) ?? (mouseType === 'move' ? 'none' : 'left');
+  const clickCount = (args.clickCount as number) || 1;
+  const event = (commandParams: Record<string, unknown>) => ({
+    action: 'sendCommand',
+    tabId: args.tabId,
+    method: 'Input.dispatchMouseEvent',
+    commandParams,
+  });
+  const move = event({ type: 'mouseMoved', x: args.x, y: args.y, button: 'none' });
+  const press = event({ type: 'mousePressed', x: args.x, y: args.y, button, clickCount });
+  const release = event({ type: 'mouseReleased', x: args.x, y: args.y, button, clickCount });
+  const actions =
+    mouseType === 'move' ? [move] :
+    mouseType === 'press' ? [press] :
+    mouseType === 'release' ? [release] :
+    [move, press, release];
+  return {
+    mode: 'sequential',
+    actions: [{ action: 'ensureDebugger', tabId: args.tabId }, ...actions],
+  };
 }
 
 async function main(): Promise<void> {
@@ -515,7 +574,7 @@ async function main(): Promise<void> {
       if (toolName === 'chrome_controller_health') {
         const report = await buildHealthReport(
           () => probeHost(getSocketPath(), HEALTH_PROBE_TIMEOUT_MS),
-          () => sendCommand('queryTabs', { timeoutMs: HEALTH_CHROME_WAIT_MS }, HEALTH_IPC_CLIENT_TIMEOUT_MS),
+          () => sendCommand('queryTabs', { timeoutMs: HEALTH_CHROME_WAIT_MS }),
         );
         return { content: [{ type: 'text', text: JSON.stringify(report, null, 2) }] };
       }
@@ -586,60 +645,12 @@ async function main(): Promise<void> {
       }
 
       if (toolName === 'chrome_type_text') {
-        const result = await sendCommand('batch', {
-          mode: 'sequential',
-          actions: [
-            { action: 'ensureDebugger', tabId: args.tabId },
-            {
-              action: 'sendCommand',
-              tabId: args.tabId,
-              method: 'Input.insertText',
-              commandParams: {
-                text: args.text,
-                animateTyping: !args.instant,
-                typingDelayMs: args.typingDelayMs ?? 50,
-                sound: args.sound !== false,
-              },
-            },
-          ],
-        });
+        const result = await sendCommand('batch', buildTypeTextBatch(args));
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       }
 
       if (toolName === 'chrome_mouse') {
-        const mouseType = (args.type ?? args.action ?? 'click') as string;
-        const button = (args.button as string) ?? (mouseType === 'move' ? 'none' : 'left');
-        const move = {
-          action: 'sendCommand',
-          tabId: args.tabId,
-          method: 'Input.dispatchMouseEvent',
-          commandParams: { type: 'mouseMoved', x: args.x, y: args.y, button: 'none' },
-        };
-        const press = {
-          action: 'sendCommand',
-          tabId: args.tabId,
-          method: 'Input.dispatchMouseEvent',
-          commandParams: { type: 'mousePressed', x: args.x, y: args.y, button, clickCount: (args.clickCount as number) || 1 },
-        };
-        const release = {
-          action: 'sendCommand',
-          tabId: args.tabId,
-          method: 'Input.dispatchMouseEvent',
-          commandParams: { type: 'mouseReleased', x: args.x, y: args.y, button, clickCount: (args.clickCount as number) || 1 },
-        };
-        const actions =
-          mouseType === 'move' ? [move] :
-          mouseType === 'press' ? [press] :
-          mouseType === 'release' ? [release] :
-          [move, press, release];
-
-        const result = await sendCommand('batch', {
-          mode: 'sequential',
-          actions: [
-            { action: 'ensureDebugger', tabId: args.tabId },
-            ...actions,
-          ],
-        });
+        const result = await sendCommand('batch', buildMouseBatch(args));
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       }
 

@@ -25,11 +25,10 @@
   - **Attempt:** For the drift, remove the overlay actions from the extension instead of adding them to the relay.
     - **Outcome:** Rejected
     - **Why:** They have real handlers and only toggle HUD state. Removing them would also need a Web Store release to take effect. Adding them to the relay makes both lists equal now.
-- **Third defect, found by the same review:** pi `chrome_batch` sent `{mode, stopOnError, actions}` with no `action`. That worked over the relay but failed over native IPC, the default transport, with `Unknown action: undefined`. The pi tests only mocked `fetch`, so nothing ran the payload through the worker. pi now sends `action: "batch"`. That fixes pi without waiting for a Web Store release, because the worker users have installed runs only `action: "batch"` bodies as batches.
+- **Third defect, found by the same review:** pi `chrome_batch` sent `{mode, stopOnError, actions}` with no `action`. That worked over the relay but failed over native IPC, the default transport, with `Unknown action: undefined`. The pi tests only mocked `fetch`, so nothing ran the payload through the worker. PR #8 fixed this on main at the same time, independently: pi now sends `action: "batch"`, so pi works without waiting for a Web Store release. This branch took #8's fix when it merged main. It adds a test that runs pi's real `chrome_batch` body through the worker, which the `fetch`-only tests could not do.
 - **Root cause:** The relay picked the item list with a nullish fallback and never checked the value. A body that named a batch but carried no array fell through to the path that forwards single commands unchecked. The two allowlists were hand-copied with no test comparing them, and no test checked that each entry reaches a handler.
 - **Resolution:**
   - `batchItemsOf` in `src/server.ts` and in `Chrome Extension/background.js`, with the same rule and error messages. In the worker, `executeAction` asks it first, so the separate `action === 'batch'` branch is gone. `runBatch` in the relay no longer carries its own array check, which is now unreachable.
-  - pi `chrome_batch` sends `action: "batch"`.
   - Both `ALLOWED_BATCH_ACTIONS` sets are identical. The dead names are gone and the overlay actions are in both.
   - Tests that used the dead names in batches (`src/server.test.ts`, `test/silent-failure.test.ts`) now use real actions.
   - `skills/chrome-controller/SKILL.md` said a nested `batch` was allowed; it now says nested batches are refused and states the item-list contract.
@@ -42,22 +41,21 @@
     - It runs every allowlisted action through the real worker and checks that none hits `Unknown action`, and that the old dead names are refused by the gate.
     - It checks that the worker applies the same batch rule, and honours `mode` and `stopOnError`.
     - It runs pi's real `chrome_batch` body through the worker.
-  - `src/index-ipc.test.ts` pins the exact pi `chrome_batch` IPC request.
+  - The pi `chrome_batch` IPC request is pinned by #8's test in `src/index-ipc.test.ts`.
   - Mutation check. Each of these was caught by at least one test:
-    - pi's `action` removed.
     - The non-batch refusal removed on either side.
     - A bare body no longer treated as a batch in the worker.
     - `mode` or `stopOnError` dropped on either side.
     - `setOverlayHidden` dropped from both lists.
     - `createWindow` added to both lists.
     - Plus the reviewer's earlier set: `??` or `||` restored, the both-keys and array checks dropped, one-sided list edits, `MAX_BATCH` removed.
-  - `npm test` (273/273), `npm run typecheck` and `npm run lint` pass. `test/silent-failure.test.ts`, which is outside `npm test`, passes.
+  - After merging main (#8, #9, #10), `npm test` passes in full, `npm run typecheck` and `npm run lint` pass. `test/silent-failure.test.ts`, which is outside `npm test`, passes.
   - Not verified against a live Chrome, because the installed extension is the Web Store build.
 - **Prevention/follow-up:**
   - The drift test fails when either list changes alone.
   - The two paths still differ on batch size. The relay caps a batch at `MAX_BATCH` (default 50), but the worker has no cap, so a native batch is bounded only by the IPC line limit. This predates the change and was left as is: the worker cannot know the relay's configured limit.
   - Out of scope, reported separately: `sendToExtension` builds `{ id, action, ...params }`, so a body or batch item carrying `id` overrides the relay's correlation id.
   - The extension-side contract change reaches users only through a Web Store release. The relay-side fix takes effect as soon as the relay is updated, and closes the bypass on its own.
-  - PR #10 adds `sendCommand` and `BATCH_CDP_METHODS` to the same lines and expects a small merge conflict. The drift test will then require `sendCommand` in both lists.
+  - PR #10 (`sendCommand` gated by `BATCH_CDP_METHODS`) merged first. Both lists now carry `sendCommand`, and the new drift test holds that.
 - **Reusable learning:** When a request field decides which validator runs, check its type, not just whether it is `null`/`undefined`. `??` lets `false`, `0` and `''` through. A duplicated allowlist needs an equality test and a test that each entry reaches a real handler.
-- **References:** `src/server.ts` (`batchItemsOf`, `ALLOWED_BATCH_ACTIONS`), `Chrome Extension/background.js` (`batchItemsOf`, `ALLOWED_BATCH_ACTIONS`), `src/server.test.ts`, `src/extension-background.test.ts`, `skills/chrome-controller/SKILL.md`.
+- **References:** `2026-09-23-pi-chrome-batch-omitted-its-action-and-only-the-relay-forgave-it.md` (PR #8), `src/server.ts` (`batchItemsOf`, `ALLOWED_BATCH_ACTIONS`), `Chrome Extension/background.js` (`batchItemsOf`, `ALLOWED_BATCH_ACTIONS`), `src/server.test.ts`, `src/extension-background.test.ts`, `skills/chrome-controller/SKILL.md`.

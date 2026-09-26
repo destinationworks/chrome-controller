@@ -4,6 +4,14 @@ import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
+import {
+  DEFAULT_CHROME_WAIT_MS,
+  FRAME_CAPTURE_ALLOWANCE_MS,
+  KEYSTROKE_ALLOWANCE_MS,
+  chromeWaitMs,
+  chromeWorkMs,
+} from './chrome-wait.js';
+import { buildMouseBatch, buildTypeTextBatch } from './mcp.js';
 import chromeControllerPiExtension from './index.ts';
 
 const TEST_API_KEY = 'test-key-0123456789abcdef01234567';
@@ -37,9 +45,12 @@ function clone<T>(value: T): T {
 function createWorker(
   sharedStorage: Map<string, unknown>,
   options: {
-    debuggerSendCommand?: () => Promise<unknown>;
+    debuggerSendCommand?: (target: unknown, method: string, params?: unknown) => Promise<unknown>;
+    tabsSendMessage?: (tabId: number, message: Record<string, unknown>) => Promise<unknown>;
     now?: () => number;
     storageReadsFailing?: boolean;
+    timers?: { setTimeout: (fn: () => void, ms?: number) => unknown; clearTimeout: (id: unknown) => void };
+    math?: Math;
   } = {},
 ) {
   const nativeMessages: Record<string, unknown>[] = [];
@@ -52,6 +63,7 @@ function createWorker(
   let queryTabsCalls = 0;
   let removeTabCalls = 0;
   let debuggerSendCalls = 0;
+  const chromeTouches: string[] = [];
   let storageWritesFailing = false;
 
   const nativePort = {
@@ -124,10 +136,12 @@ function createWorker(
       onRemoved: tabRemoved,
       async query() { queryTabsCalls += 1; return []; },
       async get(tabId: number) { return { id: tabId, windowId: 1, title: '', url: '', active: true }; },
-      async sendMessage() { return {}; },
-      async group() { return 1; },
+      async sendMessage(tabId: number, message: Record<string, unknown>) {
+        return options.tabsSendMessage ? options.tabsSendMessage(tabId, message) : {};
+      },
+      async group() { chromeTouches.push('tabs.group'); return 1; },
       async remove() { removeTabCalls += 1; },
-      async update() { return {}; },
+      async update() { chromeTouches.push('tabs.update'); return {}; },
       async create() { return {}; },
     },
     tabGroups: {
@@ -138,11 +152,11 @@ function createWorker(
     },
     debugger: {
       onEvent: debuggerOnEvent,
-      async attach() {},
+      async attach() { chromeTouches.push('debugger.attach'); },
       async detach() {},
-      async sendCommand() {
+      async sendCommand(target: unknown, method: string, params?: unknown) {
         debuggerSendCalls += 1;
-        return options.debuggerSendCommand ? options.debuggerSendCommand() : {};
+        return options.debuggerSendCommand ? options.debuggerSendCommand(target, method, params) : {};
       },
     },
   };
@@ -158,10 +172,11 @@ function createWorker(
     TextEncoder,
     URL,
     console: { log() {}, warn() {}, error() {} },
-    setTimeout,
-    clearTimeout,
+    setTimeout: options.timers?.setTimeout ?? setTimeout,
+    clearTimeout: options.timers?.clearTimeout ?? clearTimeout,
     queueMicrotask,
     structuredClone,
+    ...(options.math ? { Math: options.math } : {}),
   });
   vm.runInContext(backgroundSource, context, { filename: backgroundPath });
 
@@ -171,6 +186,7 @@ function createWorker(
     context,
     debuggerOnEvent,
     debuggerSendCalls: () => debuggerSendCalls,
+    chromeTouches: () => [...chromeTouches],
     nativeMessages,
     nativeOnDisconnect,
     nativeOnMessage,
@@ -467,28 +483,210 @@ test('relay rotation invalidates the old transport before connecting with the ne
   assert.equal(rotatedUrl.searchParams.get('key'), rotatedKey);
 });
 
-// ── Batch allowlist and payload contract ───────────────────────────────────
+// ── Working time of long actions vs. the shared timeout budget ─────────────
+//
+// chrome-wait.ts mirrors the extension's defaults and loops to size the host's
+// wait. These run the real worker on a virtual clock, with Chrome's latency set
+// to the most the budget allows, to hold the two together: if the extension's
+// loops or defaults change, the budget must change with them.
 
-/** The batch allowlist as the running worker holds it. */
-function extensionBatchActions(): string[] {
-  const worker = createWorker(new Map());
-  return Array.from(vm.runInContext('ALLOWED_BATCH_ACTIONS', worker.context) as Iterable<string>);
+/**
+ * A virtual clock for the worker's setTimeout. Time jumps to the next due timer
+ * only after every promise chain started so far has settled, so `run` measures
+ * exactly the worker's own sleeps plus the injected Chrome latencies.
+ */
+function virtualClock() {
+  let now = 0;
+  let nextId = 0;
+  const due = new Map<number, { at: number; fn: () => void }>();
+  const setTimer = (fn: () => void, ms?: number) => {
+    nextId += 1;
+    // Browsers run a NaN or negative delay at once.
+    due.set(nextId, { at: now + Math.max(0, Number(ms) || 0), fn });
+    return nextId;
+  };
+  return {
+    setTimeout: setTimer,
+    clearTimeout(id: unknown) { due.delete(id as number); },
+    /** A Chrome call that answers `value` after `ms` of virtual time. */
+    latency<T>(ms: number, value: T): Promise<T> {
+      return new Promise((resolve) => setTimer(() => resolve(value), ms));
+    },
+    async run(action: Promise<unknown>): Promise<number> {
+      let settled = false;
+      void action.then(() => { settled = true; }, () => { settled = true; });
+      const start = now;
+      for (;;) {
+        await flushWorkerTasks();
+        if (settled) return now - start;
+        let nextKey = 0;
+        let next: { at: number; fn: () => void } | undefined;
+        for (const [key, timer] of due) {
+          if (!next || timer.at < next.at) { next = timer; nextKey = key; }
+        }
+        if (!next) throw new Error('the worker went idle without answering');
+        due.delete(nextKey);
+        now = next.at;
+        next.fn();
+      }
+    },
+  };
 }
 
-async function runNative(message: Record<string, unknown>) {
-  const worker = createWorker(new Map());
+async function timeNativeAction(
+  clock: ReturnType<typeof virtualClock>,
+  worker: ReturnType<typeof createWorker>,
+  request: Record<string, unknown>,
+): Promise<{ elapsed: number; response: Record<string, any> | undefined }> {
   await flushWorkerTasks();
-  await worker.nativeOnMessage.emit({ id: 1, ...message });
-  const response = worker.nativeMessages.find((m) => m.id === 1) as Record<string, any>;
-  return { response, queryTabsCalls: worker.queryTabsCalls };
+  const elapsed = await clock.run(worker.nativeOnMessage.emit(request));
+  return { elapsed, response: worker.nativeMessages.find((message) => message.id === request.id) };
 }
+
+test('captureVideo at the slowest frame the budget allows finishes within its budgeted work', async () => {
+  for (const params of [{}, { fps: 10, duration: 3 }, { fps: 30, duration: 2 }]) {
+    const clock = virtualClock();
+    const worker = createWorker(new Map(), {
+      timers: clock,
+      debuggerSendCommand: (_target, method) => method === 'Page.captureScreenshot'
+        ? clock.latency(FRAME_CAPTURE_ALLOWANCE_MS, { data: 'frame' })
+        : Promise.resolve({}),
+    });
+    const request = { id: 1, action: 'captureVideo', tabId: 42, ...params };
+    const { elapsed, response } = await timeNativeAction(clock, worker, request);
+    const work = chromeWorkMs('captureVideo', request);
+    const label = JSON.stringify(params);
+    assert.equal(response?.error, undefined, label);
+    assert.ok(response?.result.count > 0, `${label}: frames were captured`);
+    assert.equal(response?.result.frames.filter((frame: { error?: string }) => frame.error).length, 0, label);
+    assert.ok(elapsed <= work, `${label}: took ${elapsed}ms, budgeted ${work}ms`);
+    // Tight, not vacuous: only the interval after the last frame goes unspent.
+    const intervalMs = Math.round(1000 / response?.result.fps);
+    assert.equal(elapsed, work - intervalMs, `${label}: worst case realized`);
+  }
+});
+
+test('getConsoleLogs answers only after its whole window, so the window alone can never be the wait', async () => {
+  for (const params of [{}, { timeoutMs: 3000 }]) {
+    const attachLatencyMs = 1000;
+    const clock = virtualClock();
+    const worker = createWorker(new Map(), {
+      timers: clock,
+      debuggerSendCommand: (_target, method) => method === 'Runtime.enable'
+        ? clock.latency(attachLatencyMs, {})
+        : Promise.resolve({}),
+    });
+    const request = { id: 1, action: 'getConsoleLogs', tabId: 42, ...params };
+    const { elapsed, response } = await timeNativeAction(clock, worker, request);
+    const label = JSON.stringify(params);
+    assert.deepEqual(response?.result, { logs: [], count: 0 }, label);
+    assert.equal(elapsed, chromeWorkMs('getConsoleLogs', request) + attachLatencyMs, `${label}: window plus setup`);
+    // What the host used to wait: the window itself, which always loses.
+    assert.ok(elapsed > Number(params.timeoutMs ?? 2000), label);
+    assert.ok(elapsed < chromeWaitMs('getConsoleLogs', request), `${label}: the host now outwaits it`);
+  }
+});
+
+test('animated typing at the slowest keystroke the budget allows finishes within its budgeted work', async () => {
+  // Every key a pause key, and Math.random at its maximum: the extension's worst case.
+  const text = ',.!?;: '.repeat(6);
+  for (const typingDelayMs of [undefined, 12, 50, 240]) {
+    const clock = virtualClock();
+    const math = Object.create(Math) as Math;
+    math.random = () => 1 - Number.EPSILON;
+    const halfKeystroke = KEYSTROKE_ALLOWANCE_MS / 2;
+    const worker = createWorker(new Map(), {
+      timers: clock,
+      math,
+      debuggerSendCommand: (_target, method) => method === 'Input.insertText'
+        ? clock.latency(halfKeystroke, {})
+        : Promise.resolve({}),
+      tabsSendMessage: (_tabId, message) => message.action === 'visualizeAction'
+        ? clock.latency(halfKeystroke, {})
+        : Promise.resolve({}),
+    });
+    const request = {
+      id: 1,
+      action: 'sendCommand',
+      tabId: 42,
+      method: 'Input.insertText',
+      commandParams: { text, animateTyping: true, typingDelayMs, sound: false },
+    };
+    const { elapsed, response } = await timeNativeAction(clock, worker, request);
+    const work = chromeWorkMs('sendCommand', request);
+    const label = `typingDelayMs ${String(typingDelayMs)}`;
+    assert.equal(response?.error, undefined, label);
+    assert.equal(elapsed, work, `${label}: took ${elapsed}ms, budgeted ${work}ms`);
+  }
+});
+
+test('a batch of long actions finishes within its budgeted work in either mode', async () => {
+  for (const mode of ['sequential', 'parallel']) {
+    const clock = virtualClock();
+    const worker = createWorker(new Map(), {
+      timers: clock,
+      debuggerSendCommand: (_target, method) => method === 'Page.captureScreenshot'
+        ? clock.latency(FRAME_CAPTURE_ALLOWANCE_MS, { data: 'frame' })
+        : Promise.resolve({}),
+    });
+    const request = {
+      id: 1,
+      action: 'batch',
+      mode,
+      actions: [
+        { action: 'captureVideo', tabId: 42 },
+        { action: 'getConsoleLogs', tabId: 42, timeoutMs: 3000 },
+      ],
+    };
+    const { elapsed, response } = await timeNativeAction(clock, worker, request);
+    assert.equal(response?.result.success, true, mode);
+    const work = chromeWorkMs('batch', request);
+    assert.ok(elapsed <= work, `${mode}: took ${elapsed}ms, budgeted ${work}ms`);
+    assert.ok(elapsed < DEFAULT_CHROME_WAIT_MS + work, mode);
+  }
+});
+
+test('a batch of 40 ordinary actions at measured latency fits its per-item allowance', async () => {
+  // ~450 ms per ordinary action was measured on a live Chrome, so 40 of them
+  // take 18 s: more than one ordinary 15 s round trip.
+  const measuredActionMs = 450;
+  const clock = virtualClock();
+  const worker = createWorker(new Map(), {
+    timers: clock,
+    debuggerSendCommand: () => clock.latency(measuredActionMs, { data: 'png' }),
+  });
+  const request = {
+    id: 1,
+    action: 'batch',
+    mode: 'sequential',
+    actions: Array.from({ length: 40 }, () => ({ action: 'captureScreenshot', tabId: 42 })),
+  };
+  const { elapsed, response } = await timeNativeAction(clock, worker, request);
+  assert.equal(response?.result.success, true);
+  assert.equal(elapsed, 40 * measuredActionMs);
+  assert.ok(elapsed > DEFAULT_CHROME_WAIT_MS, 'the ordinary wait alone would not cover it');
+  assert.ok(elapsed < chromeWaitMs('batch', request), `took ${elapsed}ms, host waits ${chromeWaitMs('batch', request)}ms`);
+});
+
+// ── CDP input commands inside batches ──────────────────────────────────────
+//
+// chrome_type_text and chrome_mouse (MCP and pi) send their CDP input as
+// `sendCommand` items of a batch. The batch allowlist must admit exactly those
+// input methods and nothing else of raw CDP.
 
 async function runNativeBatch(batch: Record<string, unknown>) {
-  return (await runNative({ action: 'batch', ...batch })).response;
+  const cdpCalls: { method: string; params: any }[] = [];
+  const worker = createWorker(new Map(), {
+    debuggerSendCommand: async (_target, method, params) => { cdpCalls.push({ method, params }); return {}; },
+  });
+  await flushWorkerTasks();
+  await worker.nativeOnMessage.emit({ id: 1, action: 'batch', ...batch });
+  const response = worker.nativeMessages.find((message) => message.id === 1) as Record<string, any>;
+  return { response, cdpCalls, debuggerSendCalls: worker.debuggerSendCalls, chromeTouches: worker.chromeTouches };
 }
 
-/** Captures the body a pi tool sends; the IPC and relay paths send the same one. */
-async function piRequestBody(tool: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+/** Captures the payload a pi tool sends to the relay. */
+async function piPayload(tool: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
   const tools: Record<string, { execute: (...args: unknown[]) => Promise<unknown> }> = {};
   chromeControllerPiExtension({ registerTool: (t: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) => { tools[t.name] = t; } } as never);
   const saved = { url: process.env.CHROME_CONTROLLER_URL, key: process.env.CHROME_CONTROLLER_API_KEY, fetch: global.fetch };
@@ -510,6 +708,141 @@ async function piRequestBody(tool: string, params: Record<string, unknown>): Pro
   return sent;
 }
 
+test('chrome_type_text batches run in the real worker and reach CDP', async () => {
+  const payloads = {
+    'mcp': buildTypeTextBatch({ tabId: 42, text: 'hi', instant: true }),
+    'pi': await piPayload('chrome_type_text', { tabId: 42, text: 'hi', instant: true }),
+  };
+  for (const [client, batch] of Object.entries(payloads)) {
+    const { response, cdpCalls } = await runNativeBatch(batch);
+    assert.equal(response?.error, undefined, `${client}: ${String(response?.error)}`);
+    assert.equal(response?.result.success, true, `${client}: ${JSON.stringify(response?.result)}`);
+    assert.deepEqual(cdpCalls.filter((call) => call.method === 'Input.insertText').map((call) => call.params.text), ['hi'], client);
+  }
+});
+
+test('chrome_type_text animated typing inside a batch types every character', async () => {
+  const { response, cdpCalls } = await runNativeBatch(buildTypeTextBatch({ tabId: 42, text: 'ok', typingDelayMs: 12, sound: false }));
+  assert.equal(response?.result.success, true, JSON.stringify(response?.result));
+  assert.deepEqual(cdpCalls.filter((call) => call.method === 'Input.insertText').map((call) => call.params.text), ['o', 'k']);
+});
+
+test('chrome_mouse batches run in the real worker for every mouse type', async () => {
+  const expected: Record<string, string[]> = {
+    click: ['mouseMoved', 'mousePressed', 'mouseReleased'],
+    move: ['mouseMoved'],
+    press: ['mousePressed'],
+    release: ['mouseReleased'],
+  };
+  for (const [type, events] of Object.entries(expected)) {
+    const payloads = {
+      mcp: buildMouseBatch({ tabId: 42, action: type, x: 10, y: 20 }),
+      pi: await piPayload('chrome_mouse', { tabId: 42, type, x: 10, y: 20 }),
+    };
+    for (const [client, batch] of Object.entries(payloads)) {
+      const { response, cdpCalls } = await runNativeBatch(batch);
+      const label = `${client} ${type}`;
+      assert.equal(response?.result?.success, true, `${label}: ${JSON.stringify(response)}`);
+      assert.deepEqual(
+        cdpCalls.filter((call) => call.method === 'Input.dispatchMouseEvent').map((call) => call.params.type),
+        events,
+        label,
+      );
+    }
+  }
+});
+
+/** Raw CDP a batch must refuse: other domains, the other Input methods, and
+ *  anything that only resembles an admitted method. */
+const REFUSED_BATCH_METHODS: unknown[] = [
+  'Runtime.evaluate',
+  'Page.navigate',
+  'Network.getAllCookies',
+  undefined,
+  // Siblings of the admitted methods: key events, drag data (which can carry
+  // file paths), and switching input off are all outside what the tools need.
+  'Input.dispatchKeyEvent',
+  'Input.dispatchDragEvent',
+  'Input.setIgnoreInputEvents',
+  'Input.dispatchTouchEvent',
+  ['Input.insertText'],
+  'input.insertText',
+  'Input.insertText ',
+  7,
+  { toString: 'Input.insertText' },
+];
+
+test('a batch still refuses raw CDP beyond the input methods, before touching Chrome', async () => {
+  for (const mode of ['sequential', 'parallel']) {
+    for (const method of REFUSED_BATCH_METHODS) {
+      const { response, debuggerSendCalls, chromeTouches } = await runNativeBatch({
+        mode,
+        actions: [{ action: 'ensureDebugger', tabId: 42 }, { action: 'sendCommand', tabId: 42, method }],
+      });
+      const label = `${mode} ${JSON.stringify(method)}`;
+      assert.match(String(response?.error), /Batch item 1 sends CDP method .* which batches do not allow/, label);
+      assert.equal(debuggerSendCalls(), 0, `${label}: no CDP command ran`);
+      assert.deepEqual(chromeTouches(), [], `${label}: the debugger was not attached, nor the tab grouped`);
+    }
+  }
+});
+
+test('the MCP input batches carry exactly what the tools were asked for', () => {
+  const mouse = (args: Record<string, unknown>) => buildMouseBatch({ tabId: 42, x: 10, y: 20, ...args }).actions as any[];
+  const click = mouse({ action: 'click' });
+  assert.deepEqual(click[0], { action: 'ensureDebugger', tabId: 42 });
+  assert.deepEqual(click.slice(1).map((item) => item.commandParams), [
+    { type: 'mouseMoved', x: 10, y: 20, button: 'none' },
+    { type: 'mousePressed', x: 10, y: 20, button: 'left', clickCount: 1 },
+    { type: 'mouseReleased', x: 10, y: 20, button: 'left', clickCount: 1 },
+  ]);
+  assert.ok(click.slice(1).every((item) => item.action === 'sendCommand' && item.tabId === 42 && item.method === 'Input.dispatchMouseEvent'));
+  assert.deepEqual(mouse({ type: 'press', button: 'right', clickCount: 2 })[1].commandParams, { type: 'mousePressed', x: 10, y: 20, button: 'right', clickCount: 2 });
+  assert.deepEqual(mouse({ type: 'move' })[1].commandParams, { type: 'mouseMoved', x: 10, y: 20, button: 'none' });
+  // `type` wins over the legacy `action` name, and click is the default.
+  assert.equal(mouse({ type: 'release', action: 'click' }).length, 2);
+  assert.equal(mouse({}).length, 4);
+
+  const typed = (args: Record<string, unknown>) => (buildTypeTextBatch({ tabId: 42, text: 'hi', ...args }).actions as any[])[1];
+  assert.deepEqual(typed({}), {
+    action: 'sendCommand',
+    tabId: 42,
+    method: 'Input.insertText',
+    commandParams: { text: 'hi', animateTyping: true, typingDelayMs: 50, sound: true },
+  });
+  assert.deepEqual(typed({ instant: true, typingDelayMs: 20, sound: false }).commandParams, { text: 'hi', animateTyping: false, typingDelayMs: 20, sound: false });
+  assert.equal(buildTypeTextBatch({ tabId: 42, text: 'hi' }).mode, 'sequential');
+});
+
+test('the extension and the relay admit the same CDP methods in batches', async () => {
+  const { BATCH_CDP_METHODS } = await import('./server.js');
+  const declared = backgroundSource.match(/const BATCH_CDP_METHODS = new Set\((\[[^\]]*\])\);/);
+  assert.ok(declared, 'BATCH_CDP_METHODS is declared in background.js');
+  const extensionMethods = JSON.parse(declared[1].replace(/'/g, '"')) as string[];
+  assert.deepEqual([...extensionMethods].sort(), [...BATCH_CDP_METHODS].sort());
+});
+
+// ── Batch allowlist and payload contract ───────────────────────────────────
+
+/** The batch allowlist as the running worker holds it. */
+function extensionBatchActions(): string[] {
+  const worker = createWorker(new Map());
+  return Array.from(vm.runInContext('ALLOWED_BATCH_ACTIONS', worker.context) as Iterable<string>);
+}
+
+async function runNative(message: Record<string, unknown>) {
+  const worker = createWorker(new Map());
+  await flushWorkerTasks();
+  await worker.nativeOnMessage.emit({ id: 1, ...message });
+  const response = worker.nativeMessages.find((m) => m.id === 1) as Record<string, any>;
+  return { response, queryTabsCalls: worker.queryTabsCalls };
+}
+
+/** The worker's answer to one native batch. */
+async function nativeBatchResponse(batch: Record<string, unknown>) {
+  return (await runNativeBatch(batch)).response;
+}
+
 test('the extension and the relay admit the same batch actions', async () => {
   const { ALLOWED_BATCH_ACTIONS } = await import('./server.js');
   // No intended differences: an action one side admits and the other refuses
@@ -521,7 +854,7 @@ test('actions kept out of batches stay out, and the gate refuses them', async ()
   // Each has a handler in the worker, so only the allowlist keeps it out.
   for (const action of ['batch', 'createWindow', 'screenshot']) {
     assert.ok(!extensionBatchActions().includes(action), action);
-    const response = await runNativeBatch({ actions: [{ action: 'queryTabs' }, { action, tabId: 42, actions: [] }] });
+    const response = await nativeBatchResponse({ actions: [{ action: 'queryTabs' }, { action, tabId: 42, actions: [] }] });
     assert.match(String(response?.error), /Batch item 1 (specifies disallowed action|cannot be a nested batch)/, action);
   }
 });
@@ -530,10 +863,11 @@ test('every batch-allowlisted action has a handler in the real worker', async ()
   const actions = extensionBatchActions();
   assert.ok(actions.length > 0);
   for (const action of actions) {
-    // Short timings keep getConsoleLogs and captureVideo from waiting.
-    const response = await runNativeBatch({
+    // Short timings keep getConsoleLogs and captureVideo from waiting, and
+    // sendCommand needs a method batches admit.
+    const response = await nativeBatchResponse({
       mode: 'sequential',
-      actions: [{ action, tabId: 42, timeoutMs: 1, fps: 1, duration: 1 }],
+      actions: [{ action, tabId: 42, timeoutMs: 1, fps: 1, duration: 1, method: 'Input.dispatchMouseEvent', commandParams: { type: 'mouseMoved', x: 1, y: 1 } }],
     });
     assert.equal(response?.error, undefined, `${action}: ${String(response?.error)}`);
     const [item] = response.result.results;
@@ -544,13 +878,13 @@ test('every batch-allowlisted action has a handler in the real worker', async ()
 
 test('an unhandled action name is refused by the batch gate, not reported as unknown', async () => {
   for (const action of ['clickElement', 'typeText', 'navigate', 'click', 'type']) {
-    const response = await runNativeBatch({ actions: [{ action, tabId: 42 }] });
+    const response = await nativeBatchResponse({ actions: [{ action, tabId: 42 }] });
     assert.match(String(response?.error), new RegExp(`disallowed action "${action}"`), action);
   }
 });
 
 test('overlay actions work as batch items', async () => {
-  const response = await runNativeBatch({
+  const response = await nativeBatchResponse({
     mode: 'sequential',
     actions: [{ action: 'setOverlayHidden', hidden: true }, { action: 'getOverlayState' }],
   });
@@ -561,30 +895,30 @@ test('overlay actions work as batch items', async () => {
 test('a native batch honours mode and stopOnError', async () => {
   // visualizeAction without a tabId fails in the worker.
   const items = [{ action: 'visualizeAction' }, { action: 'queryTabs' }];
-  const stopped = await runNativeBatch({ mode: 'sequential', commands: items });
+  const stopped = await nativeBatchResponse({ mode: 'sequential', commands: items });
   assert.equal(stopped.result.mode, 'sequential');
   assert.deepEqual(stopped.result.results.map((r: { success: boolean }) => r.success), [false]);
-  const continued = await runNativeBatch({ mode: 'sequential', stopOnError: false, commands: items });
+  const continued = await nativeBatchResponse({ mode: 'sequential', stopOnError: false, commands: items });
   assert.deepEqual(continued.result.results.map((r: { success: boolean }) => r.success), [false, true]);
-  const parallel = await runNativeBatch({ commands: items });
+  const parallel = await nativeBatchResponse({ commands: items });
   assert.equal(parallel.result.mode, 'parallel');
   assert.deepEqual(parallel.result.results.map((r: { success: boolean }) => r.success), [false, true]);
 });
 
 test('a native batch takes its items from exactly one array under actions or commands', async () => {
   for (const key of ['actions', 'commands']) {
-    const response = await runNativeBatch({ [key]: [{ action: 'queryTabs' }] });
+    const response = await nativeBatchResponse({ [key]: [{ action: 'queryTabs' }] });
     assert.equal(response?.result?.success, true, `${key}: ${JSON.stringify(response)}`);
   }
   for (const actions of [false, 0, '', null]) {
-    const withCommands = await runNativeBatch({ actions, commands: [{ action: 'queryTabs' }] });
+    const withCommands = await nativeBatchResponse({ actions, commands: [{ action: 'queryTabs' }] });
     assert.match(String(withCommands?.error), /either actions or commands/, JSON.stringify(actions));
-    const alone = await runNativeBatch({ actions });
+    const alone = await nativeBatchResponse({ actions });
     assert.match(String(alone?.error), /actions array/, JSON.stringify(actions));
   }
-  const both = await runNativeBatch({ actions: [{ action: 'queryTabs' }], commands: [{ action: 'queryTabs' }] });
+  const both = await nativeBatchResponse({ actions: [{ action: 'queryTabs' }], commands: [{ action: 'queryTabs' }] });
   assert.match(String(both?.error), /either actions or commands/);
-  assert.match(String((await runNativeBatch({}))?.error), /actions array/);
+  assert.match(String((await nativeBatchResponse({}))?.error), /actions array/);
 });
 
 test('the worker decides what is a batch the same way the relay does', async () => {
@@ -600,12 +934,12 @@ test('the worker decides what is a batch the same way the relay does', async () 
     assert.match(String(response?.error), /Only a batch can carry/, key);
     assert.equal(queryTabsCalls(), 0, key);
   }
-  const nested = await runNativeBatch({ actions: [{ action: 'queryTabs', commands: [{ action: 'queryTabs' }] }] });
+  const nested = await nativeBatchResponse({ actions: [{ action: 'queryTabs', commands: [{ action: 'queryTabs' }] }] });
   assert.match(String(nested.result.results[0].error), /Only a batch can carry/);
 });
 
 test('pi chrome_batch runs in the real worker', async () => {
-  const body = await piRequestBody('chrome_batch', { mode: 'sequential', actions: [{ action: 'queryTabs' }] });
+  const body = await piPayload('chrome_batch', { mode: 'sequential', actions: [{ action: 'queryTabs' }] });
   // The worker in users' browsers predates the rule above and runs a body as a
   // batch only when it names action "batch".
   assert.equal(body.action, 'batch');

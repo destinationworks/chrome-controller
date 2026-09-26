@@ -1,0 +1,21 @@
+# 2026-09-23 — pi chrome_batch omitted its action, and only the relay forgave it
+
+- **Status:** Resolved
+- **Task/context:** The pi extension's `chrome_batch` tool (`src/index.ts`). Found while wiring the shared timeout budget into the pi client (`2026-09-23-ipc-client-gave-up-before-the-host-it-was-waiting-on.md`).
+- **Unexpected observation or failure:** The tool sent `{ mode, stopOnError, actions }` with no `action` field. Over Native Messaging, the host forwards `action` to Chrome as given, so the extension threw `Unknown action: undefined` and pi's `chrome_batch` failed on the primary transport. The MCP equivalent (`sendCommand('batch', ...)` in `src/mcp.ts`) was correct.
+- **Evidence:**
+  - An IPC request without an `action` got `Error: Unknown action: undefined` from the live host on 2026-09-23.
+  - The new regression tests failed on the old payload with `actual: undefined, expected: 'batch'`.
+- **Approaches tried:**
+  - **Attempt:** Work out why `chrome_batch sends raw actions payload` passed.
+    - **Outcome:** Worked
+    - **Why:** Two things hid the bug:
+      - The tests assert against a mocked `fetch`, which is the relay transport, because `chromeRequest` uses the IPC path only outside `NODE_ENV=test`.
+      - The relay (`src/server.ts`) treats any body with an `actions` array as a batch whether or not `action` is set.
+      - So the only path the tests exercised tolerated the missing field, and the test asserted the shape it was given (`mode`, `actions.length`) rather than the contract the host needs (`action: 'batch'`).
+- **Root cause:** The payload was written against the relay's lenient parsing. It was only ever tested through that transport, never through the native host, which forwards `action` verbatim.
+- **Resolution:** Added `action: 'batch'` to the pi payload. Both existing `chrome_batch` tests now assert it. A new test in `src/index-ipc.test.ts` runs the tool over the IPC path against the fake host and checks the exact forwarded request and that the relay was never touched.
+- **Verification:** All three tests failed before the fix and pass after it. `npm test`, `npm run typecheck` and `npm run lint` pass.
+- **Prevention/follow-up:** Test pi tools on the IPC path too, since `NODE_ENV=test` routes every mocked test in `src/index.test.ts` through the relay. A tool that differs between transports needs a test on each.
+- **Reusable learning:** A lenient fallback transport can hide a malformed request from the primary one. Test the strictest consumer of a payload, and assert the fields the receiver needs, not the fields the sender happened to include.
+- **References:** `src/index.ts` (`chrome_batch`), `src/index.test.ts`, `src/index-ipc.test.ts`, `src/server.ts` (HTTP batch detection by `actions`).
