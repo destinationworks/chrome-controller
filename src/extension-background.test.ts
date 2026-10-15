@@ -145,7 +145,7 @@ function createWorker(
       async query() { queryTabsCalls += 1; return []; },
       async get(tabId: number) { return { id: tabId, windowId: 1, title: '', url: '', active: true }; },
       async sendMessage(tabId: number, message: Record<string, unknown>) {
-        return options.tabsSendMessage ? options.tabsSendMessage(tabId, message) : {};
+        return options.tabsSendMessage ? options.tabsSendMessage(tabId, message) : { success: true };
       },
       async group() { chromeTouches.push('tabs.group'); return 1; },
       async remove() { removeTabCalls += 1; },
@@ -212,6 +212,122 @@ async function flushWorkerTasks(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
+
+const contentActions = ['clickSelector', 'fillSelector', 'selectOption', 'snapshotElements', 'getPageErrors'];
+
+test('content actions reject invalid tab IDs before touching Chrome', async () => {
+  for (const action of contentActions) {
+    for (const tabId of [undefined, null, 0, -1, 1.5, '42', true, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      let sends = 0;
+      const worker = createWorker(new Map(), { tabsSendMessage: async () => { sends += 1; return { success: true }; } });
+      await flushWorkerTasks();
+      await worker.nativeOnMessage.emit({ id: 150, action, tabId, selector: '#message' });
+      const reply = worker.nativeMessages.find(message => message.id === 150);
+      assert.match(String(reply?.error), /requires a positive integer tabId/, `${action}/${String(tabId)}`);
+      assert.equal(sends, 0);
+      assert.deepEqual(worker.chromeTouches(), []);
+    }
+  }
+});
+
+test('a missing DOM batch target rejects the whole batch before its first item', async () => {
+  for (const mode of ['sequential', 'parallel']) {
+    const worker = createWorker(new Map());
+    await flushWorkerTasks();
+    await worker.nativeOnMessage.emit({ id: 151, action: 'batch', mode, stopOnError: false, actions: [
+      { action: 'queryTabs' }, { action: 'clickSelector', selector: '#message' },
+      { action: 'sendCommand', tabId: 42, method: 'Input.insertText', commandParams: { text: 'synthetic' } },
+    ] });
+    const reply = worker.nativeMessages.find(message => message.id === 151);
+    assert.match(String(reply?.error), /requires a positive integer tabId/);
+    assert.equal(worker.queryTabsCalls(), 0);
+    assert.equal(worker.debuggerSendCalls(), 0);
+    assert.deepEqual(worker.chromeTouches(), []);
+  }
+});
+
+test('content actions require an explicit successful content-script acknowledgement', async () => {
+  for (const action of contentActions) {
+    const canary = 'synthetic-private-content-error';
+    for (const outcome of ['unavailable', undefined, null, {}, { success: 'true', value: canary },
+      { success: 1, value: canary }, { success: false, error: canary }]) {
+      const worker = createWorker(new Map(), { tabsSendMessage: async (_tabId, message) => {
+        if (message.action !== action) return { success: true };
+        if (outcome === 'unavailable') throw new Error(canary);
+        return outcome;
+      } });
+      await flushWorkerTasks();
+      await worker.nativeOnMessage.emit({ id: 152, action, tabId: 42, selector: '#message' });
+      const reply = worker.nativeMessages.find(message => message.id === 152);
+      assert.match(String(reply?.error), /Content action .* failed/, `${action}/${JSON.stringify(outcome)}`);
+      assert.equal(reply?.result, undefined);
+      assert.equal(JSON.stringify(reply).includes(canary), false);
+    }
+  }
+});
+
+test('content actions preserve successful empty and populated acknowledgements', async () => {
+  for (const action of contentActions) {
+    const acknowledgement = { success: true, elements: [], count: 0, value: 'synthetic' };
+    const worker = createWorker(new Map(), { tabsSendMessage: async () => acknowledgement });
+    await flushWorkerTasks();
+    await worker.nativeOnMessage.emit({ id: 153, action, tabId: 42, selector: '#message' });
+    const reply = worker.nativeMessages.find(message => message.id === 153);
+    assert.equal(reply?.error, undefined);
+    assert.deepEqual(reply?.result, acknowledgement);
+  }
+});
+
+test('a failed content acknowledgement stops the remaining sequential batch items', async () => {
+  const worker = createWorker(new Map(), { tabsSendMessage: async (_tabId, message) =>
+    message.action === 'clickSelector' ? { success: false, error: 'synthetic selector failure' } : { success: true },
+  });
+  await flushWorkerTasks();
+  await worker.nativeOnMessage.emit({ id: 154, action: 'batch', mode: 'sequential', actions: [
+    { action: 'clickSelector', tabId: 42, selector: '#missing' }, { action: 'queryTabs' },
+  ] });
+  const reply = worker.nativeMessages.find(message => message.id === 154);
+  const result = reply?.result as { success: boolean; results: { success: boolean; error?: string }[] };
+  assert.equal(result.success, false);
+  assert.equal(result.results.length, 1);
+  assert.equal(result.results[0]?.success, false);
+  assert.match(String(result.results[0]?.error), /Content action clickSelector failed/);
+  assert.equal(worker.queryTabsCalls(), 0);
+});
+
+test('optional HUD delivery does not prevent an independent CDP action', async () => {
+  const worker = createWorker(new Map(), { tabsSendMessage: async () => { throw new Error('synthetic HUD unavailable'); } });
+  await flushWorkerTasks();
+  await worker.nativeOnMessage.emit({ id: 155, action: 'ensureDebugger', tabId: 42 });
+  const reply = worker.nativeMessages.find(message => message.id === 155);
+  assert.equal(reply?.error, undefined);
+  assert.deepEqual(reply?.result, { success: true });
+  assert.ok(worker.chromeTouches().includes('debugger.attach'));
+  await worker.nativeOnMessage.emit({ id: 156, action: 'sendCommand', tabId: 42,
+    method: 'Input.insertText', commandParams: { text: 'synthetic' } });
+  const inserted = worker.nativeMessages.find(message => message.id === 156);
+  assert.equal(inserted?.error, undefined);
+  assert.equal(worker.debuggerSendCalls(), 1);
+  assert.deepEqual(inserted?.result, {});
+});
+
+test('stopOnError false continues after a content failure while retaining aggregate failure', async () => {
+  const worker = createWorker(new Map(), { tabsSendMessage: async (_tabId, message) =>
+    message.action === 'clickSelector' ? { success: false } : { success: true },
+  });
+  await flushWorkerTasks();
+  await worker.nativeOnMessage.emit({ id: 157, action: 'batch', mode: 'sequential', stopOnError: false, actions: [
+    { action: 'clickSelector', tabId: 42, selector: '#missing' }, { action: 'queryTabs' },
+  ] });
+  const reply = worker.nativeMessages.find(message => message.id === 157);
+  const result = reply?.result as { success: boolean; results: { success: boolean; result?: unknown }[] };
+  assert.equal(result.success, false);
+  assert.equal(result.results.length, 2);
+  assert.equal(result.results[0]?.success, false);
+  assert.equal(result.results[1]?.success, true);
+  assert.deepEqual(result.results[1]?.result, []);
+  assert.equal(worker.queryTabsCalls(), 1);
+});
 
 test('actual extension worker restores guards across restart and enforces them over native and relay paths', async () => {
   const storage = new Map<string, unknown>();

@@ -406,6 +406,26 @@ async function sendTabMessage(tabId, message, options = { frameId: 0 }) {
   }
 }
 
+const REQUIRED_CONTENT_ACTIONS = new Set([
+  'clickSelector', 'fillSelector', 'selectOption', 'snapshotElements', 'getPageErrors',
+]);
+
+function assertContentActionTarget(action, params) {
+  if (REQUIRED_CONTENT_ACTIONS.has(action) &&
+      (!Number.isSafeInteger(params.tabId) || params.tabId <= 0)) {
+    throw new Error(`Content action ${action} requires a positive integer tabId`);
+  }
+}
+
+async function sendRequiredTabMessage(tabId, message) {
+  const result = await sendTabMessage(tabId, message);
+  if (!result || typeof result !== 'object' || Array.isArray(result) || result.success !== true) {
+    // Content errors can contain page data. Never forward an unsuccessful payload.
+    throw new Error(`Content action ${message.action} failed: no successful content-script acknowledgement`);
+  }
+  return result;
+}
+
 async function getTabInfo(tabId) {
   try {
     const tab = await chrome.tabs.get(tabId);
@@ -685,6 +705,7 @@ async function runBatch(actions, options = {}) {
       throw new Error(`Batch item ${index} sends CDP method "${method}", which batches do not allow`);
     }
     const { action, ...params } = item;
+    assertContentActionTarget(action, params);
     return { action, params };
   });
 
@@ -724,6 +745,7 @@ async function runBatch(actions, options = {}) {
 }
 
 async function executeAction(action, params = {}) {
+  assertContentActionTarget(action, params);
   const batchItems = batchItemsOf(action, params);
   if (batchItems) return runBatch(batchItems, params);
 
@@ -766,14 +788,14 @@ async function executeAction(action, params = {}) {
     );
   } else if (action === 'clickSelector') {
     await setControlledTab(params.tabId, 'clickSelector');
-    result = await sendTabMessage(params.tabId, {
+    result = await sendRequiredTabMessage(params.tabId, {
       action: 'clickSelector',
       selector: params.selector,
       elementId: params.elementId,
     });
   } else if (action === 'fillSelector') {
     await setControlledTab(params.tabId, 'fillSelector');
-    result = await sendTabMessage(params.tabId, {
+    result = await sendRequiredTabMessage(params.tabId, {
       action: 'fillSelector',
       selector: params.selector,
       elementId: params.elementId,
@@ -781,7 +803,7 @@ async function executeAction(action, params = {}) {
     });
   } else if (action === 'selectOption') {
     await setControlledTab(params.tabId, 'selectOption');
-    result = await sendTabMessage(params.tabId, {
+    result = await sendRequiredTabMessage(params.tabId, {
       action: 'selectOption',
       selector: params.selector,
       elementId: params.elementId,
@@ -789,12 +811,12 @@ async function executeAction(action, params = {}) {
     });
   } else if (action === 'snapshotElements') {
     await setControlledTab(params.tabId, 'snapshotElements');
-    result = await sendTabMessage(params.tabId, {
+    result = await sendRequiredTabMessage(params.tabId, {
       action: 'snapshotElements',
       showOverlay: params.showOverlay !== false,
     });
   } else if (action === 'getPageErrors') {
-    result = await sendTabMessage(params.tabId, { action: 'getPageErrors' });
+    result = await sendRequiredTabMessage(params.tabId, { action: 'getPageErrors' });
   } else if (action === 'attachDebugger') {
     await chrome.debugger.attach({ tabId: params.tabId }, params.requiredVersion || '1.3');
     await setControlledTab(params.tabId, 'attachDebugger');

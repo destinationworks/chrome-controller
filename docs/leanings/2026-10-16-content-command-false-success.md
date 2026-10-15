@@ -1,0 +1,22 @@
+# 2026-10-16 — Content commands need an explicit acknowledgement
+
+- **Status:** Resolved
+- **Task/context:** Verify the installed Chrome controller through the real Pi CLI without disturbing existing browser sessions.
+- **Unexpected observation or failure:** A malformed Pi batch omitted the item-level tab ID. The worker returned success with a null result although no DOM action ran. A content handler returning `success: false` also appeared as a successful batch item.
+- **Evidence:** The actual worker VM, reached through its native-message entry point, reproduced both false acknowledgements before the implementation changed. Invalid targets, missing receivers, malformed acknowledgements and negative replies failed the new regressions on the old source.
+- **Approaches tried:**
+  - **Attempt:** Make every tab message strict.
+    - **Outcome:** Did not work
+    - **Why:** Rejected by inspection: optional HUD delivery uses the same helper and must not prevent independent CDP commands on restricted pages.
+  - **Attempt:** Validate only the Pi batch schema.
+    - **Outcome:** Partial
+    - **Why:** Better tool guidance helps callers but does not protect direct native requests or detect receiver and handler failures.
+  - **Attempt:** Validate required DOM targets at direct dispatch and during whole-batch normalization, then require an explicit boolean success acknowledgement for the five required content actions.
+    - **Outcome:** Worked
+    - **Why:** The worker now refuses invalid work before effects and reports actual content failures while preserving successful replies and best-effort HUD behavior.
+- **Root cause:** A best-effort helper returned null for absent targets or messaging failures; direct dispatch accepted that result and batch aggregation counted promise fulfillment rather than content-handler success.
+- **Resolution:** Add a strict wrapper for required DOM messages, keep optional visualization messages best effort, prevalidate every DOM batch target, and document item-level action/target requirements. Bump the synchronized extension and package versions to 1.3.1 so the fix cannot be confused with the 1.3.0 Store revision already pending review.
+- **Verification:** Worker regressions exercise invalid IDs, parallel/sequential prevalidation, missing receivers, truthy nonboolean success, failed-payload canary suppression, valid replies, stop/continue behavior and CDP input with an unavailable HUD. Release checks and live acceptance are recorded in the PR; acknowledgement alone is not proof of the final DOM state.
+- **Prevention/follow-up:** Check real fixture values and click counts, include a missing-selector negative case, preserve unrelated tabs, and never cancel a pending Store review merely to test a newer local candidate.
+- **Reusable learning:** Required browser actions need explicit handler acknowledgement; optional visualization must not define command success.
+- **References:** `Chrome Extension/background.js`, `src/extension-background.test.ts`, `src/index.ts`, `docs/user-guide.md#dom-command-acknowledgements-and-batches`.
