@@ -518,11 +518,14 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI, options: C
     label: 'Chrome Batch',
     description: 'Send multiple Chrome Controller actions in one request.',
     promptSnippet: 'Batch Chrome Controller actions in parallel or sequential mode.',
-    promptGuidelines: ['Use chrome_batch for independent tab/server actions.'],
+    promptGuidelines: [
+      'Use chrome_batch for independent tab/server actions.',
+      'Each item needs its own action and target tabId when that action operates on a tab. A batch has no shared tabId.',
+    ],
     parameters: Type.Object({
       mode: Type.Optional(Type.Union([Type.Literal('parallel'), Type.Literal('sequential')])),
       stopOnError: Type.Optional(Type.Boolean()),
-      actions: Type.Array(Type.Any({ description: 'Array of Chrome Controller action payloads.' })),
+      actions: Type.Array(Type.Any({ description: 'Action payloads, each with action and its own required parameters, including tabId for tab actions.' })),
     }),
     async execute(_toolCallId, params, signal) {
       return textResult(

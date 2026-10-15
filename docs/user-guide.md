@@ -317,6 +317,27 @@ The extension connects to the WebSocket relay only after the current browser ses
    fill/click success does not prove that the input CDP batch path works. Never run global
    managed-tab cleanup in a shared browser; close only the test's recorded tab IDs.
 
+### DOM command acknowledgements and batches
+
+`clickSelector`, `fillSelector`, `selectOption`, `snapshotElements` and `getPageErrors`
+require a positive safe integer `tabId` and an explicit successful content-script reply.
+A missing receiver, selector failure or malformed reply produces a generic error; failed
+page payloads are not returned. Optional HUD delivery remains best effort so a page that
+cannot display the HUD can still accept an independent CDP command.
+
+Every batch item supplies its own `action` and required `tabId`; a top-level batch target
+is not inherited. Invalid DOM targets reject the whole batch before any item starts in
+either mode. A valid target whose content handler fails marks that item unsuccessful:
+sequential mode stops by default, while `stopOnError: false` continues and keeps the
+aggregate result unsuccessful. This acknowledgement proves handler completion; verify
+the actual input value, selection or click effect separately when checking a workflow.
+
+Manual verification: on a disposable localhost form, enter Unicode through Pi's
+`chrome_type_text`, select an option, click and inspect the resulting DOM state. Then
+click a missing selector and send a batch with a missing DOM `tabId`; both must fail,
+and an earlier item in the invalid batch must not mutate the page. Keep a pending Web
+Store revision intact when testing a newer unpacked candidate locally.
+
 
 ### Q: Popup says "Disconnected / Local bridge not running"
 1. Verify you ran `npm run build` after cloning the repository.
