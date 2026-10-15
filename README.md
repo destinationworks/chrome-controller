@@ -60,6 +60,8 @@ When your agent issues its first browser command, Chrome will automatically laun
 
 Use this path if you are developing new features, modifying the Chrome extension code, or running an unpacked version for testing.
 
+Repository development requires Node.js 22.19 or newer for the pinned Pi SDK.
+
 ### Step 1: Clone and Build
 ```bash
 git clone https://github.com/dst0/chrome-controller.git
@@ -120,6 +122,17 @@ Chrome Controller can be directly loaded into Pi:
 ```bash
 pi -e /ABSOLUTE/PATH/TO/chrome-controller/src/index.ts
 ```
+
+Pi is an optional peer supplied by the agent that loads the extension. The development
+installation pins a Pi version for type checking and tests; an MCP-only production
+installation does not need to install the Pi CLI. The peer range remains compatible
+with existing Pi installations. Installing development dependencies does not update
+the user's `pi` executable or existing sessions.
+
+After an update, verify the source version, compiled bridge, running native host and
+Chrome extension separately. `npm run build` updates files, while an already running
+host keeps its loaded code. Chrome Web Store publication can also lag the repository.
+See the [runtime update checklist](docs/user-guide.md#runtime-update-checklist).
 
 ---
 

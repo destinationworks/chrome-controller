@@ -1,0 +1,22 @@
+# 2026-10-16 — Keep the Pi CLI out of MCP runtime dependencies
+
+- **Status:** Resolved
+- **Task/context:** CTRL-RUNTIME-001, fix the installed bridge dependency audit and validate the release boundary.
+- **Unexpected observation or failure:** Production audit reported four vulnerabilities, including an auto-installed Pi peer and its transitive dependencies, even though the MCP entry point does not import the Pi CLI at runtime.
+- **Evidence:** The old lock selected MCP SDK 1.30.0 and Pi 0.85.1 with undici 8.9.0. Updating only the SDK left the Pi findings; Pi 0.86.1 fixed undici but retained a vulnerable nested brace-expansion 5.0.9. The final candidate's complete audit reports zero findings.
+- **Approaches tried:**
+  - **Attempt:** Run a broad audit fix with the required wildcard Pi peer.
+    - **Outcome:** Partial
+    - **Why:** It removed findings but retained an unnecessary full CLI in production and changed the resolved CLI major version.
+  - **Attempt:** Update the SDK and pin the development peer to Pi 0.86.1, then deduplicate.
+    - **Outcome:** Did not work
+    - **Why:** A vulnerable nested dependency remained.
+  - **Attempt:** Raise the SDK minimum to 1.32.1, make the Pi peer optional, and pin Pi 1.2.0 for development validation.
+    - **Outcome:** Worked
+    - **Why:** The development API stays available while MCP-only installations can omit the unrelated CLI. The runtime peer range retains compatibility with existing agents.
+- **Root cause:** A required wildcard peer mixed development API validation with MCP production installation.
+- **Resolution:** Separate the optional runtime peer from the exact development dependency and regenerate the lockfile without lifecycle scripts. The resolved production tree also updates ws to 8.22.0 and TypeBox to 1.3.37; this is not an SDK-only update. Repository development now requires Node 22.19 or newer.
+- **Verification:** Typecheck, lint, build and all 338 tests pass; complete dependency audit reports zero findings. An installation outside every repository ancestor used `npm ci --ignore-scripts --omit=dev`, confirmed Pi physically absent, imported the compiled plugin and completed real MCP initialize/tools-list with 20 tools. Actual installed Pi 0.86.1 separately completed Native Messaging health and the synthetic DOM flow; other peer versions are not claimed as tested.
+- **Prevention/follow-up:** Validate the installed tree and production-only clean checkout; do not change users' global Pi executables or session data as a side effect of bridge dependency maintenance.
+- **Reusable learning:** A type-only agent API dependency must not silently install a complete CLI into an independent MCP runtime.
+- **References:** `package.json`, `package-lock.json`, `src/index.ts`, `.github/workflows/ci.yml`.

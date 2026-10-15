@@ -30,7 +30,7 @@
     ]
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "ws": "^8.16.0"
   },
   "peerDependencies": {
@@ -38,6 +38,7 @@
     "typebox": "*"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.2.0",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
     "@typescript-eslint/eslint-plugin": "^8.63.0",
@@ -46,5 +47,10 @@
     "playwright-core": "^1.62.0",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
   }
 }
