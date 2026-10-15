@@ -64,7 +64,7 @@ Chrome Controller takes a different approach:
 ## Prerequisites
 
 - **Google Chrome** (or Chromium-based browser with Native Messaging support).
-- **Node.js** v18.0.0 or higher.
+- **Node.js** v22.19.0 or higher for repository installation, builds and tests (the pinned development Pi SDK requires this version).
 - **macOS** or **Linux** (Windows supported via WSL).
 
 ---
@@ -292,6 +292,31 @@ The extension connects to the WebSocket relay only after the current browser ses
 ---
 
 ## Troubleshooting & FAQs
+
+### Runtime update checklist
+
+1. Record the source revision and package version, then run `npm ci --ignore-scripts`,
+   `npm run typecheck`, `npm run lint`, `npm test`, `npm run build`, and `npm audit`.
+   The Pi CLI is a pinned development dependency and an optional runtime peer. MCP-only
+   installations can omit development dependencies after building; they do not need Pi.
+2. Run `npm run watchdog` and record the running host PID. A build changes files on disk,
+   not code already loaded by that PID. Inspect the extension's version and source at
+   `chrome://extensions`; repository, bridge and Web Store versions can differ.
+3. Before disabling, reloading or updating the extension, finish concurrent controller
+   requests and let secret guards expire. Chrome clears extension session storage on
+   reload/disable/update; native-host exit also clears its in-memory redaction guards.
+   Older `hostPing` responses expose pending requests, extraction and quarantine state,
+   but do not prove that every redaction guard expired. Establish recent guarded-operation
+   history before restarting; an idle health response alone is insufficient.
+4. Preserve the native-host manifest before testing an unpacked extension. The installer
+   replaces its allowlist with one supplied ID. Keep the Store installation available for
+   rollback, register only the exact intended origins, and enable only one extension
+   against a given IPC socket. Do not restart Chrome or clear profiles, cookies or tabs.
+5. Prove the resulting version using a disposable localhost page: Unicode input through
+   `chrome_type_text`, selection, click, DOM readback and screenshot through Pi. Basic DOM
+   fill/click success does not prove that the input CDP batch path works. Never run global
+   managed-tab cleanup in a shared browser; close only the test's recorded tab IDs.
+
 
 ### Q: Popup says "Disconnected / Local bridge not running"
 1. Verify you ran `npm run build` after cloning the repository.
