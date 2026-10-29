@@ -47,6 +47,7 @@ function createWorker(
   sharedStorage: Map<string, unknown>,
   options: {
     debuggerSendCommand?: (target: unknown, method: string, params?: unknown) => Promise<unknown>;
+    tabsGet?: (tabId: number) => Promise<Record<string, unknown>>;
     tabsSendMessage?: (tabId: number, message: Record<string, unknown>) => Promise<unknown>;
     now?: () => number;
     storageReadsFailing?: boolean;
@@ -143,7 +144,7 @@ function createWorker(
     tabs: {
       onRemoved: tabRemoved,
       async query() { queryTabsCalls += 1; return []; },
-      async get(tabId: number) { return { id: tabId, windowId: 1, title: '', url: '', active: true }; },
+      async get(tabId: number) { return options.tabsGet ? options.tabsGet(tabId) : { id: tabId, windowId: 1, title: '', url: '', active: true }; },
       async sendMessage(tabId: number, message: Record<string, unknown>) {
         return options.tabsSendMessage ? options.tabsSendMessage(tabId, message) : { success: true };
       },
@@ -1449,4 +1450,79 @@ test('a second guarded extraction still runs while an earlier guard is active', 
 
   assert.ok(worker.nativeMessages.find((message) => message.id === 79)?.result);
   assert.deepEqual(cdp.evaluated(), ['guarded-extraction', 'guarded-extraction']);
+});
+
+
+test('secret target admission reads only matching tab identity and never reserves a guard', async () => {
+  for (const outcome of ['present', 'missing', 'mismatched']) {
+    const storage = new Map<string, unknown>();
+    const worker = createWorker(storage, { tabsGet: async (tabId) => {
+      if (outcome === 'missing') throw new Error('Synthetic private browser detail');
+      return { id: outcome === 'mismatched' ? 99 : tabId, title: 'Private title', url: 'https://private.example/' };
+    } });
+    await flushWorkerTasks();
+    const before = [...storage.entries()];
+    await worker.nativeOnMessage.emit({ id: 901, action: 'preflightSecretTarget', targetTabId: 42, sensitive: true });
+    const response = worker.nativeMessages.find((m) => m.id === 901);
+    assert.deepEqual(response, outcome === 'present' ? { id: 901, result: { tabId: 42 } } : { id: 901, error: 'Guarded target admission failed' });
+    assert.deepEqual([...storage.entries()], before);
+    assert.equal(worker.alarmState.size, 0);
+    assert.equal(worker.removeTabCalls(), 0);
+    assert.equal(worker.debuggerSendCalls(), 0);
+    assert.deepEqual(worker.chromeTouches(), []);
+    assert.ok(!JSON.stringify(response).includes('Private'));
+  }
+});
+
+test('late target admission cannot acknowledge across a new secret operation', async () => {
+  const storage = new Map<string, unknown>();
+  let release!: (value: Record<string, unknown>) => void;
+  const worker = createWorker(storage, { tabsGet: () => new Promise((resolve) => { release = resolve; }) });
+  await flushWorkerTasks();
+  const pending = worker.nativeOnMessage.emit({ id: 902, action: 'preflightSecretTarget', targetTabId: 42, sensitive: true });
+  await flushWorkerTasks();
+  await worker.nativeOnMessage.emit({ id: 903, action: 'syntheticSensitiveFailure', tabId: 99, sensitive: true, guardTtlSeconds: 300 });
+  const retained = [...storage.entries()];
+  release({ id: 42 });
+  await pending;
+  assert.deepEqual(worker.nativeMessages.find((m) => m.id === 902), { id: 902, error: 'Guarded target admission failed' });
+  assert.deepEqual([...storage.entries()], retained);
+  assert.equal(worker.alarmState.has('protected-tab:99'), true);
+  assert.equal(worker.alarmState.has('protected-tab:42'), false);
+  assert.equal(worker.removeTabCalls(), 0);
+});
+
+test('target admission preserves unrelated protected tabs and their expiry', async () => {
+  const storage = new Map<string, unknown>();
+  const worker = createWorker(storage);
+  await flushWorkerTasks();
+  await worker.nativeOnMessage.emit({ id: 904, action: 'syntheticSensitiveFailure', tabId: 99, sensitive: true, guardTtlSeconds: 300 });
+  const retained = [...storage.entries()];
+  const alarm = worker.alarmState.get('protected-tab:99');
+  await worker.nativeOnMessage.emit({ id: 905, action: 'preflightSecretTarget', targetTabId: 42, sensitive: true });
+  assert.deepEqual(worker.nativeMessages.find((m) => m.id === 905), { id: 905, result: { tabId: 42 } });
+  assert.deepEqual([...storage.entries()], retained);
+  assert.deepEqual(worker.alarmState.get('protected-tab:99'), alarm);
+  assert.equal(worker.alarmState.has('protected-tab:42'), false);
+});
+
+test('target admission rejects a late completion after protected-state persistence becomes unavailable', async () => {
+  const storage = new Map<string, unknown>();
+  let release!: (value: Record<string, unknown>) => void;
+  const worker = createWorker(storage, { tabsGet: () => new Promise((resolve) => { release = resolve; }) });
+  await flushWorkerTasks();
+  await worker.nativeOnMessage.emit({ id: 906, action: 'syntheticSensitiveFailure', tabId: 99, sensitive: true, guardTtlSeconds: 300 });
+  const retained = [...storage.entries()];
+  const pending = worker.nativeOnMessage.emit({ id: 907, action: 'preflightSecretTarget', targetTabId: 42, sensitive: true });
+  await flushWorkerTasks();
+  worker.setStorageWritesFailing(true);
+  await worker.nativeOnMessage.emit({ id: 908, action: 'syntheticSensitiveFailure', tabId: 100, sensitive: true });
+  release({ id: 42 });
+  await pending;
+  assert.deepEqual(worker.nativeMessages.find((m) => m.id === 907), { id: 907, error: 'Guarded target admission failed' });
+  assert.deepEqual([...storage.entries()], retained);
+  assert.equal(worker.alarmState.has('protected-tab:42'), false);
+  await worker.nativeOnMessage.emit({ id: 909, action: 'queryTabs' });
+  assert.match(String(worker.nativeMessages.find((m) => m.id === 909)?.error), /state is unavailable/);
+  assert.equal(worker.queryTabsCalls(), 0);
 });

@@ -1296,6 +1296,11 @@ test('a guarded extraction whose Chrome goes silent gets the host\'s fail-closed
   try {
     const outcome = sendCommand('extractSecretGuarded', { tabId: 7, selector: '#token' })
       .then(() => 'resolved', (error: Error) => error.message);
+    // Admission may consume nearly its entire wait before acknowledging.
+    const admission = await chrome.nextRequest();
+    assert.equal(admission.action, 'preflightSecretTarget');
+    t.mock.timers.tick(14000);
+    chrome.answer(admission.id, { tabId: 7 });
     // The page action gets no answer within the host's ordinary wait...
     const evaluate = await chrome.nextRequest();
     assert.equal(evaluate.action, 'evaluateOnPage');
@@ -1402,6 +1407,10 @@ test('a guarded injection whose Chrome goes silent gets the host\'s fail-closed 
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const outcome = sendCommand('injectSecretGuarded', { tabId: 7, selector: '#password', value: 'synthetic-value-9' })
     .then(() => 'resolved', (error: Error) => error.message);
+  const admission = await chrome.nextRequest();
+  assert.equal(admission.action, 'preflightSecretTarget');
+  t.mock.timers.tick(14000);
+  chrome.answer(admission.id, { tabId: 7 });
   assert.equal((await chrome.nextRequest()).action, 'evaluateOnPage');
   t.mock.timers.tick(15000);
   assert.equal((await chrome.nextRequest()).action, 'removeTab');

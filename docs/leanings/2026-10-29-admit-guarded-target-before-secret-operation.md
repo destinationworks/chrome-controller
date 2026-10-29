@@ -1,0 +1,23 @@
+# 2026-10-29 — Admit the guarded target before a secret operation
+
+- **Status:** Partial
+- **Task/context:** Diagnose a quarantined native secret-transfer host without exposing credentials or disrupting unrelated browser work.
+- **Unexpected observation or failure:** The host could quarantine globally when extraction and its recovery close both addressed a missing or inaccessible tab. Its Boolean-only quarantine then rejected every browser request except health.
+- **Evidence:** A synthetic native-IPC regression failed with quarantine before the fix. The worker reserved a protected tab before its page operation established that the target existed. The installed manifest allowed multiple extension origins against one socket; the live host's origin was identified, but the incident's actual profile/version mismatch remains unconfirmed.
+- **Approaches tried:**
+  - **Attempt:** Clear quarantine or restart immediately because health showed no pending requests.
+    - **Outcome:** Rejected.
+    - **Why:** Health does not expose all active guard expiries or prove the failed source retired; a reset could remove unrelated redaction protection.
+  - **Attempt:** Add profile-specific transport routing and persistent quarantine recovery.
+    - **Outcome:** Deferred.
+    - **Why:** Larger identity/state changes require their own design and independent runtime evidence.
+  - **Attempt:** Admit the target with a dedicated metadata-only worker operation before any secret operation.
+    - **Outcome:** Synthetic regression fixed.
+    - **Why:** Known admission failures send no expression/value, reserve no guard and require no recovery close. An older worker sees no top-level `tabId`, avoiding its generic sensitive-action reservation.
+- **Additional timeout evidence:** Virtual-clock extraction and injection fixtures held admission for 14 seconds, then exhausted both 15-second page/close waits. With the old two-round-trip client budget they failed with ambiguous `NATIVE_IPC_TIMEOUT`; the three-round-trip budget preserves the host's definitive quarantine answer.
+- **Root cause:** Confirmed design gap: target admission and uncertain secret execution shared the same close/quarantine failure path. The historical incident's underlying transport/profile failure remains unconfirmed.
+- **Resolution:** Serialize target preflight in the host, return only a matching positive tab ID from the worker, suppress provider error details, and preserve existing close/quarantine behavior once secret execution starts. Reject old-worker admission rather than replaying a secret operation.
+- **Verification:** Regression-first native target refusal failed before the fix. Both virtual-clock deadline cases also failed with the old 32-second budget. After repair, 9 focused tests, typecheck and lint passed; the final standard full suite passed 351/351. Two earlier full runs failed the unchanged overlay drag-persistence fixture (one also exposed two scripted fixtures needing admission acknowledgment). The overlay fixture passed in isolation in both trees, the clean baseline full suite passed 345/345, and the final patched full suite passed without another code change. This records observed test nondeterminism rather than claiming its underlying cause fixed. No live runtime was installed or restarted.
+- **Prevention/follow-up:** Deploy matching host/worker support only after safe runtime-update prerequisites. This source change does not recover the already quarantined process and is not installed by its tests. Existence preflight does not pin page origin or prevent navigation after admission.
+- **Reusable learning:** Separate known pre-secret target refusal from uncertain secret execution; never weaken protection to make a transport failure disappear.
+- **References:** `src/native-host.ts`, `Chrome Extension/background.js`, `src/native-host.test.ts`, `src/extension-background.test.ts`, `docs/user-guide.md`.

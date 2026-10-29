@@ -356,6 +356,7 @@ test('NativeMessagingHost guards later DOM, accessibility, encoded, and error ou
   try {
     // @ts-expect-error Access private method for integration-boundary testing
     host.requestFromChrome = async (action: string, params: Record<string, unknown>) => {
+      if (action === 'preflightSecretTarget') return { tabId: params.targetTabId };
       if (action === 'evaluateOnPage') {
         assert.strictEqual(params.sensitive, true, 'guarded evaluation did not suppress extension logs/events');
         const expression = String(params.expression || '');
@@ -482,8 +483,9 @@ test('NativeMessagingHost quarantines output after an indeterminate guarded extr
 
   try {
     // @ts-expect-error Access private method for indeterminate-failure testing
-    host.requestFromChrome = async () => {
+    host.requestFromChrome = async (action: string, params: Record<string, unknown>) => {
       chromeCalls += 1;
+      if (action === 'preflightSecretTarget') return { tabId: params.targetTabId };
       throw new Error('Synthetic transport timeout with unknown page outcome');
     };
     const extraction = await ipcRequest(testSocket, {
@@ -497,7 +499,7 @@ test('NativeMessagingHost quarantines output after an indeterminate guarded extr
     const inspection = await ipcRequest(testSocket, { action: 'inspectPage', tabId: 42 });
     assert.strictEqual(inspection.success, false);
     assert.match(String(inspection.error), /quarantined/);
-    assert.strictEqual(chromeCalls, 2, 'quarantined inspection reached Chrome after the close attempt');
+    assert.strictEqual(chromeCalls, 3, 'quarantined inspection reached Chrome after the close attempt');
 
     // @ts-expect-error Access private method for quarantine egress regression coverage
     host.handleMessageFromChrome({ event: 'debuggerEvent', params: { value: 'unregistered-secret' } });
@@ -718,6 +720,7 @@ test('NativeMessagingHost guarded injection registers output protection before r
   try {
     // @ts-expect-error Access private method for integration-boundary testing
     host.requestFromChrome = async (action: string, params: Record<string, unknown>) => {
+      if (action === 'preflightSecretTarget') return { tabId: params.targetTabId };
       assert.equal(action, 'evaluateOnPage');
       assert.equal(params.sensitive, true);
       assert.equal(params.guardValue, synthetic);
@@ -1227,5 +1230,88 @@ test('PID file write does not follow a symlink planted at its path', async () =>
   } finally {
     host.close();
     fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+// A wrong-profile tab must fail admission before any page operation or new guard.
+test('guarded target admission failure preserves unrelated guards without quarantining', async () => {
+  if (process.platform === 'win32') return;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nmh-target-admission-'));
+  const socket = path.join(directory, 'test.sock');
+  const host = new NativeMessagingHost(socket);
+  await host.ready;
+  const synthetic = 'ExistingUnrelatedGuard_42!';
+  // @ts-expect-error Access private state to establish an unrelated retained guard.
+  host.registerSensitiveOutputGuard(synthetic, 300);
+  try {
+    for (const action of ['extractSecretGuarded', 'injectSecretGuarded']) {
+      for (const outcome of ['missing', 'mismatch', 'malformed']) {
+        const calls: string[] = [];
+        // @ts-expect-error Replace only the Chrome transport.
+        host.requestFromChrome = async (command: string, params: Record<string, unknown>) => {
+          calls.push(command);
+          if (command === 'preflightSecretTarget') {
+            assert.deepEqual(params, { targetTabId: 42, sensitive: true });
+            if (outcome === 'mismatch') return { tabId: 99 };
+            if (outcome === 'malformed') return null;
+            throw new Error(synthetic);
+          }
+          if (command === 'inspectPage') return { text: synthetic };
+          throw new Error('Unexpected page action');
+        };
+        const result = await ipcRequest(socket, { action, tabId: 42, selector: '#secret', value: 'NewSyntheticValue!', ttlSeconds: 300 });
+        assert.equal(result.success, false);
+        assert.match(String(result.error), /target admission/);
+        assert.ok(!JSON.stringify(result).includes(synthetic));
+        assert.deepEqual(calls, ['preflightSecretTarget']);
+        const health = await ipcRequest(socket, { action: 'hostPing' });
+        assert.equal((health.result as Record<string, unknown>).browserOutputQuarantined, false);
+        const inspected = await ipcRequest(socket, { action: 'inspectPage' });
+        assert.ok(!JSON.stringify(inspected).includes(synthetic));
+        assert.match(JSON.stringify(inspected), /SECURE_CLIPBOARD_REDACTED/);
+        // @ts-expect-error Admission must not create or remove guards.
+        assert.equal(host.sensitiveOutputGuards.length, 1);
+      }
+    }
+  } finally { host.close(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+
+test('target admission holds serialization and preserves quarantine after a later ambiguous failure', async () => {
+  if (process.platform === 'win32') return;
+  for (const action of ['extractSecretGuarded', 'injectSecretGuarded']) {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nmh-target-race-'));
+    const socket = path.join(directory, 'test.sock');
+    const host = new NativeMessagingHost(socket);
+    await host.ready;
+    const calls: string[] = [];
+    let release!: (value: unknown) => void;
+    let entered!: () => void;
+    const enteredAdmission = new Promise<void>((resolve) => { entered = resolve; });
+    try {
+      // @ts-expect-error Replace only the Chrome transport, retaining real IPC concurrency.
+      host.requestFromChrome = async (command: string) => {
+        calls.push(command);
+        if (command === 'preflightSecretTarget') {
+          entered();
+          return new Promise((resolve) => { release = resolve; });
+        }
+        throw new Error('Synthetic target disappeared after admission');
+      };
+      const pending = ipcRequest(socket, { action, tabId: 42, selector: '#secret', value: 'SyntheticInjectionValue!', ttlSeconds: 300 });
+      await enteredAdmission;
+      const blocked = await ipcRequest(socket, { action: 'queryTabs' });
+      assert.equal(blocked.success, false);
+      assert.match(String(blocked.error), /locked/);
+      assert.deepEqual(calls, ['preflightSecretTarget']);
+      release({ tabId: 42 });
+      const failed = await pending;
+      assert.equal(failed.success, false);
+      assert.match(String(failed.error), /quarantined/);
+      assert.deepEqual(calls, ['preflightSecretTarget', 'evaluateOnPage', 'removeTab']);
+      const health = await ipcRequest(socket, { action: 'hostPing' });
+      assert.equal((health.result as Record<string, unknown>).browserOutputQuarantined, true);
+      assert.equal((health.result as Record<string, unknown>).sensitiveExtractionInProgress, false);
+    } finally { host.close(); fs.rmSync(directory, { recursive: true, force: true }); }
   }
 });

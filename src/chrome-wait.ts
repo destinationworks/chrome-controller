@@ -208,8 +208,8 @@ export function withChromeWait(action: string, params: Params): Params {
 /**
  * How long an IPC client waits for the host: the host's own deadline for this
  * request plus the delivery margin. hostPing, which the host answers without
- * Chrome, gets the short local wait instead. A guarded secret action takes up to two
- * Chrome round trips at the ordinary wait, whatever the request says: the page
+ * Chrome, gets the short local wait instead. A guarded secret action takes up to three
+ * Chrome round trips at the ordinary wait, whatever the request says: target admission, the page
  * action, then closing the tab when it fails. A wait the host will reject is
  * answered at once, so the ordinary deadline is ample for it.
  */
@@ -217,7 +217,7 @@ export function ipcClientTimeoutMs(action: string, params: Params): number {
   if (HOST_LOCAL_ACTIONS.has(action)) return HOST_LOCAL_WAIT_MS;
   let hostDeadlineMs: number;
   if (GUARDED_ACTIONS.has(action)) {
-    hostDeadlineMs = 2 * DEFAULT_CHROME_WAIT_MS;
+    hostDeadlineMs = 3 * DEFAULT_CHROME_WAIT_MS;
   } else {
     try {
       hostDeadlineMs = chromeWaitMs(action, params);
