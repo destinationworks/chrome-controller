@@ -1,6 +1,6 @@
 # Chrome Controller (`p agent extension`)
 
-[![Chrome Web Store](https://img.shields.io/badge/Chrome_Web_Store-v1.1.2-blue.svg?logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/p-agent-extension/gocbenlgkgeaiifofilndbnaeigpplca)
+[![Chrome Web Store](https://img.shields.io/badge/Chrome_Web_Store-v1.3.0-blue.svg?logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/p-agent-extension/gocbenlgkgeaiifofilndbnaeigpplca)
 [![GitHub](https://img.shields.io/badge/GitHub-Repository-black.svg?logo=github)](https://github.com/dst0/chrome-controller)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-Passing-brightgreen.svg)](test)

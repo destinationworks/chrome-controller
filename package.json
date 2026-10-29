@@ -1,6 +1,6 @@
 {
   "name": "chrome-controller",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "Local Chrome control bridge — Pi/AGY extension + MCP server + Native Messaging IPC",
   "type": "module",
   "main": "dist/index.js",
