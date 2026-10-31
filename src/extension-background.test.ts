@@ -1526,3 +1526,46 @@ test('target admission rejects a late completion after protected-state persisten
   assert.match(String(worker.nativeMessages.find((m) => m.id === 909)?.error), /state is unavailable/);
   assert.equal(worker.queryTabsCalls(), 0);
 });
+
+test('target admission rejects a late completion when protected state becomes unavailable without a new guarded action', async () => {
+  let release!: (value: Record<string, unknown>) => void;
+  const worker = createWorker(new Map(), { tabsGet: () => new Promise((resolve) => { release = resolve; }) });
+  await flushWorkerTasks();
+  const pending = worker.nativeOnMessage.emit({ id: 913, action: 'preflightSecretTarget', targetTabId: 42, sensitive: true });
+  await flushWorkerTasks();
+  // Releasing a closed tab's guard fails to persist: the state flips without bumping the output-lock epoch.
+  worker.setStorageWritesFailing(true);
+  await worker.tabRemoved.emit(43);
+  release({ id: 42 });
+  await pending;
+  assert.deepEqual(worker.nativeMessages.find((m) => m.id === 913), { id: 913, error: 'Guarded target admission failed' });
+  assert.equal(worker.removeTabCalls(), 0);
+  await worker.nativeOnMessage.emit({ id: 914, action: 'queryTabs' });
+  assert.match(String(worker.nativeMessages.find((m) => m.id === 914)?.error), /state is unavailable/);
+  assert.equal(worker.queryTabsCalls(), 0);
+});
+
+test('target admission is refused while a guarded action is in flight, without reading the tab', async () => {
+  const cdp = cdpRecorder();
+  const inFlight = cdp.hold('guarded-extraction');
+  const admittedTabReads: number[] = [];
+  const worker = createWorker(new Map(), {
+    debuggerSendCommand: cdp.send,
+    tabsGet: async (tabId) => {
+      if (tabId === 77) admittedTabReads.push(tabId);
+      return { id: tabId, windowId: 1, title: '', url: '', active: true };
+    },
+  });
+  await flushWorkerTasks();
+  const extraction = worker.nativeOnMessage.emit({ id: 915, ...guardedExtraction });
+  await flushWorkerTasks();
+  await worker.nativeOnMessage.emit({ id: 916, action: 'preflightSecretTarget', targetTabId: 77, sensitive: true });
+  assert.deepEqual(worker.nativeMessages.find((m) => m.id === 916), { id: 916, error: 'Guarded target admission failed' });
+  assert.deepEqual(admittedTabReads, [], 'a refused admission must not read the target tab');
+
+  inFlight.resolve({ result: { value: 'synthetic-secret' } });
+  await extraction;
+  await worker.nativeOnMessage.emit({ id: 917, action: 'preflightSecretTarget', targetTabId: 77, sensitive: true });
+  assert.deepEqual(worker.nativeMessages.find((m) => m.id === 917), { id: 917, result: { tabId: 77 } });
+  assert.deepEqual(admittedTabReads, [77]);
+});
