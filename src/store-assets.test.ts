@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -136,4 +136,44 @@ test('store screenshot is a verified live-extension capture', async () => {
   assert.ok(provenance.overlayBadgeCount > 0);
   assert.equal(provenance.hudExpanded, true);
   assert.equal(provenance.sha256, createHash('sha256').update(image).digest('hex'));
+});
+
+const repositoryUrl = 'https://github.com/destinationworks/chrome-controller';
+
+// The console field a section of the listing copy is pasted into: the first ```text block
+// after the numbered heading that names it.
+function listingField(markdown: string, heading: string): string {
+  const start = markdown.search(new RegExp(`^## \\d+\\. ${heading}`, 'm'));
+  assert.ok(start >= 0, `listing copy has no "${heading}" section`);
+  const block = /```text\n([\s\S]*?)\n```/.exec(markdown.slice(start));
+  assert.ok(block, `"${heading}" section has no text block`);
+  return block[1];
+}
+
+test('store listing copy fits the console limits and matches the shipped version', async () => {
+  const listing = await readFile(path.join(repoRoot, 'docs', 'chrome-web-store-listing.md'), 'utf8');
+  const manifest = JSON.parse(await readFile(path.join(repoRoot, 'Chrome Extension', 'manifest.json'), 'utf8'));
+  const summary = listingField(listing, 'Summary');
+  assert.ok(summary.length > 0 && summary.length <= 132, `summary is ${summary.length} characters; the console allows 132`);
+  assert.ok(!summary.includes('\n'), 'the summary field is a single line');
+  const description = listingField(listing, 'Detailed Description');
+  assert.ok(description.length <= 16_000, `description is ${description.length} characters; the console allows 16000`);
+  assert.match(description, new RegExp(`WHAT'S NEW IN ${manifest.version.replaceAll('.', '\\.')}\\n`), 'release notes must name the manifest version');
+});
+
+test('store listing links point at this repository and its privacy policy file exists', async () => {
+  const listing = await readFile(path.join(repoRoot, 'docs', 'chrome-web-store-listing.md'), 'utf8');
+  const readme = await readFile(path.join(repoRoot, 'README.md'), 'utf8');
+  for (const [url] of listing.matchAll(/https:\/\/github\.com\/[^\s)`"]+/g)) {
+    assert.ok(url === repositoryUrl || url.startsWith(`${repositoryUrl}/`) || url === `${repositoryUrl}.git`, `foreign GitHub link: ${url}`);
+  }
+  assert.equal(listingField(listing, 'Homepage URL'), repositoryUrl);
+  assert.equal(listingField(listing, 'Support URL'), `${repositoryUrl}/issues`);
+  const privacyUrl = listingField(listing, 'Privacy Policy URL');
+  const privacyPrefix = `${repositoryUrl}/blob/main/`;
+  assert.ok(privacyUrl.startsWith(privacyPrefix), `privacy policy must be served from this repository: ${privacyUrl}`);
+  await access(path.join(repoRoot, privacyUrl.slice(privacyPrefix.length)));
+  const storeId = /chromewebstore\.google\.com\/detail\/[^/]+\/([a-p]{32})/.exec(readme)?.[1];
+  assert.ok(storeId, 'README links the store item');
+  assert.match(listing, new RegExp(`npm run install-host ${storeId}\\n`), 'install instructions must register the store item ID');
 });
