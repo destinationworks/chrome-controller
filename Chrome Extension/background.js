@@ -248,7 +248,9 @@ async function handleNativeMessage(message) {
         throw new Error('Invalid target admission');
       }
       const tab = await chrome.tabs.get(params.targetTabId);
-      if (tab.id !== params.targetTabId || protectedTabStateUnavailable || sensitiveActionDepth > 0 || epoch !== outputLockEpoch) {
+      // A guarded action starting during the await bumps outputLockEpoch, so the epoch
+      // check covers it; protected-state loss can flip without a bump, so it is checked too.
+      if (tab.id !== params.targetTabId || protectedTabStateUnavailable || epoch !== outputLockEpoch) {
         throw new Error('Stale target admission');
       }
       sendNativeResponse(id, { result: { tabId: tab.id } });

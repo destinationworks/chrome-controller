@@ -297,9 +297,12 @@ The extension connects to the WebSocket relay only after the current browser ses
 
 Guarded extraction and injection first ask the connected worker to acknowledge the
 requested tab ID using metadata only. This preflight does not read page content,
-reserve a protected tab, or send a value/expression. A missing or inaccessible tab,
-malformed acknowledgment, or older worker refuses the operation without closing
-any tab or quarantining the host. The preflight uses `targetTabId`, rather than
+reserve a protected tab, or send a value/expression. A missing tab (or one this
+browser profile cannot see), malformed acknowledgment, or older worker refuses the
+operation without closing any tab or quarantining the host. A tab that exists but
+cannot be scripted (for example `chrome://` pages or the Chrome Web Store) is still
+admitted; the page operation then fails and the host closes that tab. The preflight
+uses `targetTabId`, rather than
 `tabId`, so an older worker cannot reserve a guard for an unsupported action.
 Native host and extension support must both be deployed before guarded transfer
 works; there is no fallback to the legacy secret operation. IPC clients must
