@@ -234,10 +234,10 @@ test('hostPing, which the host answers without Chrome, gets the short local wait
   assert.equal(ipcClientTimeoutMs('hostPing', { requestTimeoutMs: 60000 }), HOST_LOCAL_WAIT_MS);
 });
 
-test('a guarded secret action gives the host two ordinary round trips whatever the request says', () => {
+test('a guarded secret action gives the host three ordinary round trips whatever the request says', () => {
   for (const action of ['extractSecretGuarded', 'injectSecretGuarded']) {
-    assert.equal(ipcClientTimeoutMs(action, { tabId: 1 }), 2 * DEFAULT_CHROME_WAIT_MS + IPC_CLIENT_MARGIN_MS);
-    assert.equal(ipcClientTimeoutMs(action, { tabId: 1, timeoutMs: 1 }), 2 * DEFAULT_CHROME_WAIT_MS + IPC_CLIENT_MARGIN_MS);
+    assert.equal(ipcClientTimeoutMs(action, { tabId: 1 }), 3 * DEFAULT_CHROME_WAIT_MS + IPC_CLIENT_MARGIN_MS);
+    assert.equal(ipcClientTimeoutMs(action, { tabId: 1, timeoutMs: 1 }), 3 * DEFAULT_CHROME_WAIT_MS + IPC_CLIENT_MARGIN_MS);
   }
 });
 

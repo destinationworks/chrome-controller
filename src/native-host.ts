@@ -468,6 +468,21 @@ export class NativeMessagingHost {
     return sanitized;
   }
 
+  // Admission sends no value/expression and reserves no tab. A wrong profile or
+  // older worker must refuse before entering the uncertain secret-operation path.
+  private async admitSecretTarget(tabId: number): Promise<void> {
+    this.sensitiveExtractionInProgress = true;
+    try {
+      const result = await this.requestFromChrome('preflightSecretTarget', { targetTabId: tabId, sensitive: true }, true);
+      if (!result || typeof result !== 'object' || (result as { tabId?: unknown }).tabId !== tabId) {
+        throw new Error('Unacknowledged target');
+      }
+    } catch {
+      this.sensitiveExtractionInProgress = false;
+      throw new Error('Guarded target admission failed; no secret operation started');
+    }
+  }
+
   private async extractSecretGuarded(params: Record<string, unknown>): Promise<Record<string, unknown>> {
     if (this.sensitiveExtractionInProgress || this.pendingRequests.size > 0) {
       throw new Error('A guarded extraction or browser request is already in progress');
@@ -478,7 +493,7 @@ export class NativeMessagingHost {
     this.assertGuardCapacity();
     const expression = buildGuardedExtractionExpression(params);
 
-    this.sensitiveExtractionInProgress = true;
+    await this.admitSecretTarget(tabId);
     try {
       const runtimeResult = await this.requestFromChrome('evaluateOnPage', {
         tabId,
@@ -554,10 +569,9 @@ export class NativeMessagingHost {
     const alreadyGuarded = this.sensitiveOutputGuards.some((guard) => guard.value === params.value);
     if (!alreadyGuarded) this.assertGuardCapacity();
     const expression = buildGuardedInjectionExpression({ selector: params.selector, value: params.value });
-    this.registerSensitiveOutputGuard(params.value, ttl);
-
-    this.sensitiveExtractionInProgress = true;
+    await this.admitSecretTarget(tabId);
     try {
+      this.registerSensitiveOutputGuard(params.value, ttl);
       const runtimeResult = await this.requestFromChrome('evaluateOnPage', {
         tabId,
         expression,

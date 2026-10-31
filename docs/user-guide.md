@@ -293,6 +293,27 @@ The extension connects to the WebSocket relay only after the current browser ses
 
 ## Troubleshooting & FAQs
 
+### Guarded target admission and quarantine
+
+Guarded extraction and injection first ask the connected worker to acknowledge the
+requested tab ID using metadata only. This preflight does not read page content,
+reserve a protected tab, or send a value/expression. A missing or inaccessible tab,
+malformed acknowledgment, or older worker refuses the operation without closing
+any tab or quarantining the host. The preflight uses `targetTabId`, rather than
+`tabId`, so an older worker cannot reserve a guard for an unsupported action.
+Native host and extension support must both be deployed before guarded transfer
+works; there is no fallback to the legacy secret operation. IPC clients must
+budget all three ordinary round trips (admission, page operation, recovery close)
+plus their response margin; a client timeout may otherwise conceal the host's
+definitive fail-closed answer.
+
+A tab can still disappear or navigate after admission. An uncertain failure once
+the actual secret operation begins retains the existing close-or-quarantine
+behavior. Admission proves target existence in the connected profile at that
+instant; it does not pin an origin or recover an already quarantined process.
+Never clear quarantine or restart an active host based only on `pending=0`.
+Follow the guard-history and expiry requirements below and preserve unrelated tabs.
+
 ### Runtime update checklist
 
 1. Record the source revision and package version, then run `npm ci --ignore-scripts`,

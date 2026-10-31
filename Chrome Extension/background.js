@@ -239,6 +239,24 @@ async function handleNativeMessage(message) {
     return;
   }
   const epoch = outputLockEpoch;
+  // Internal metadata-only admission: never reserve a guard or touch page data.
+  // Existing protected tabs may coexist, but a concurrent secret action invalidates
+  // admission and must not let a stale completion acknowledge another target.
+  if (sensitive && action === 'preflightSecretTarget') {
+    try {
+      if (!Number.isSafeInteger(params.targetTabId) || params.targetTabId <= 0 || sensitiveActionDepth > 0) {
+        throw new Error('Invalid target admission');
+      }
+      const tab = await chrome.tabs.get(params.targetTabId);
+      if (tab.id !== params.targetTabId || protectedTabStateUnavailable || sensitiveActionDepth > 0 || epoch !== outputLockEpoch) {
+        throw new Error('Stale target admission');
+      }
+      sendNativeResponse(id, { result: { tabId: tab.id } });
+    } catch {
+      sendNativeResponse(id, { error: 'Guarded target admission failed' });
+    }
+    return;
+  }
   const entryLock = sensitive ? null : browserOutputLock(epoch);
   if (entryLock) {
     sendNativeResponse(id, { error: entryLock });
