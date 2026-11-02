@@ -10,8 +10,8 @@ tab. Edit it here first, then copy it into the console. Text typed only into the
 the 2026-09-20 description edit existed nowhere else until it was recovered from a session
 transcript (kept below under "Published before 1.3.2").
 
-The GitHub links work only while the repository is public. Do not call the extension
-"open source" in the listing until the repository carries a license.
+The GitHub links work only while the repository is public. The repository carries
+an MIT license.
 
 ---
 

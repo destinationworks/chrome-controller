@@ -2,6 +2,11 @@
   "name": "chrome-controller",
   "version": "1.3.2",
   "description": "Local Chrome control bridge — Pi/AGY extension + MCP server + Native Messaging IPC",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/destinationworks/chrome-controller.git"
+  },
   "type": "module",
   "main": "dist/index.js",
   "scripts": {

@@ -9,6 +9,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import chromeControllerPiExtension from './index.ts';
 import { setEnv, startScriptedChrome } from '../test/scripted-chrome.ts';
 
@@ -60,7 +61,7 @@ function mockFetch(result: unknown, ok = true) {
 
 test('extension registers all expected tools', () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
   const expected = [
     'chrome_controller_health',
     'chrome_query_tabs',
@@ -89,7 +90,7 @@ test('extension registers all expected tools', () => {
 
 test('chrome_controller_health calls /health endpoint', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let calledUrl = '';
   const originalFetch = global.fetch;
@@ -110,7 +111,7 @@ test('chrome_controller_health calls /health endpoint', async () => {
 
 test('relay mode rejects non-loopback controller URLs before fetch', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
   const previous = process.env.CHROME_CONTROLLER_URL;
   process.env.CHROME_CONTROLLER_URL = 'https://attacker.example';
   try {
@@ -125,7 +126,7 @@ test('relay mode rejects non-loopback controller URLs before fetch', async () =>
 
 test('chrome_query_tabs returns short response by default', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   const restore = mockFetch([
     { id: 1, title: 'Tab 1', url: 'http://example.com', active: true, windowId: 1, width: 800, height: 600, extra: 'data' },
@@ -148,7 +149,7 @@ test('chrome_query_tabs returns short response by default', async () => {
 
 test('chrome_screenshot saves file and returns path', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   const restore = mockFetch({
     success: true,
@@ -168,7 +169,7 @@ test('chrome_screenshot saves file and returns path', async () => {
 
 test('chrome_evaluate truncates large strings by default', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   const largeString = 'x'.repeat(60000);
   const restore = mockFetch({ result: { type: 'string', value: largeString } });
@@ -189,7 +190,7 @@ test('chrome_evaluate truncates large strings by default', async () => {
 
 test('chrome_evaluate with untruncated:true returns full string', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   const largeString = 'x'.repeat(60000);
   const restore = mockFetch({ result: { type: 'string', value: largeString } });
@@ -210,7 +211,7 @@ test('chrome_evaluate with untruncated:true returns full string', async () => {
 
 test('chrome_mouse sends debugger batch for click', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -235,7 +236,7 @@ test('chrome_mouse sends debugger batch for click', async () => {
 
 test('chrome_batch sends raw actions payload', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -265,7 +266,7 @@ test('chrome_batch sends raw actions payload', async () => {
 
 test('chrome_batch over the relay gives an item with work of its own its own wait', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -293,7 +294,7 @@ test('chrome_batch over the relay gives an item with work of its own its own wai
 
 test('chrome_create_tab sends correct payload', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -315,7 +316,7 @@ test('chrome_create_tab sends correct payload', async () => {
 
 test('chrome_select_tab sends correct payload', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -337,7 +338,7 @@ test('chrome_select_tab sends correct payload', async () => {
 
 test('chrome_release_tab sends correct payload', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -360,7 +361,7 @@ test('chrome_release_tab sends correct payload', async () => {
 
 test('chrome_cleanup_ai_tabs sends correct payload', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -382,7 +383,7 @@ test('chrome_cleanup_ai_tabs sends correct payload', async () => {
 
 test('chrome_capture_video sends correct payload', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -407,7 +408,7 @@ test('chrome_capture_video sends correct payload', async () => {
 
 test('chrome_type_text sends debugger batch with insertText', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -432,7 +433,7 @@ test('chrome_type_text sends debugger batch with insertText', async () => {
 
 test('chrome_type_text with instant mode disables animation', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -453,7 +454,7 @@ test('chrome_type_text with instant mode disables animation', async () => {
 
 test('chrome_extract_content sends evaluateOnPage', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -476,7 +477,7 @@ test('chrome_extract_content sends evaluateOnPage', async () => {
 
 test('chrome_extract_regions sends evaluateOnPage', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -498,7 +499,7 @@ test('chrome_extract_regions sends evaluateOnPage', async () => {
 
 test('chrome_console_logs sends getConsoleLogs', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -522,7 +523,7 @@ test('chrome_console_logs sends getConsoleLogs', async () => {
 
 test('chrome_evaluate with returnByValue false', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -543,7 +544,7 @@ test('chrome_evaluate with returnByValue false', async () => {
 
 test('chrome_evaluate with awaitPromise false', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -564,7 +565,7 @@ test('chrome_evaluate with awaitPromise false', async () => {
 
 test('chrome_mouse move type sends single action', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -588,7 +589,7 @@ test('chrome_mouse move type sends single action', async () => {
 
 test('chrome_mouse press type sends single action', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -612,7 +613,7 @@ test('chrome_mouse press type sends single action', async () => {
 
 test('chrome_mouse release type sends single action', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -636,7 +637,7 @@ test('chrome_mouse release type sends single action', async () => {
 
 test('chrome_screenshot with jpeg format and quality', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   const restore = mockFetch({ data: Buffer.from('img').toString('base64'), format: 'jpeg' });
 
@@ -651,7 +652,7 @@ test('chrome_screenshot with jpeg format and quality', async () => {
 
 test('chrome_screenshot with webp format', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   const restore = mockFetch({ data: Buffer.from('img').toString('base64'), format: 'webp' });
 
@@ -666,7 +667,7 @@ test('chrome_screenshot with webp format', async () => {
 
 test('chrome_request throws error on HTTP failure', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   const originalFetch = global.fetch;
   global.fetch = async () => ({
@@ -687,7 +688,7 @@ test('chrome_request throws error on HTTP failure', async () => {
 
 test('chrome_capture_video with custom params', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -711,7 +712,7 @@ test('chrome_capture_video with custom params', async () => {
 
 test('chrome_batch with sequential mode', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -733,7 +734,7 @@ test('chrome_batch with sequential mode', async () => {
 
 test('chrome_mouse click with right button', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -760,7 +761,7 @@ test('chrome_mouse click with right button', async () => {
 
 test('chrome_screenshot with nested data format', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   const restore = mockFetch({ data: { data: Buffer.from('nested').toString('base64') }, format: 'webp' });
 
@@ -775,7 +776,7 @@ test('chrome_screenshot with nested data format', async () => {
 
 test('chrome_console_logs uses default timeout', async () => {
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
 
   let sentPayload: unknown;
   const originalFetch = global.fetch;
@@ -813,7 +814,7 @@ test('pi: a healthy host delivers its own Chrome timeout before the IPC client g
   t.after(() => chrome.close());
   t.after(nativeIpcEnv(chrome.socketPath));
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const outcome = pi.tools['chrome_query_tabs'].execute('call_1', {}, undefined)
     .then((result) => JSON.stringify(result), (error: Error) => error.message);
@@ -830,7 +831,7 @@ test('pi: console logs collected for the whole window reach the caller over Nati
   t.after(() => chrome.close());
   t.after(nativeIpcEnv(chrome.socketPath));
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const outcome = pi.tools['chrome_console_logs'].execute('call_1', { tabId: 1 }, undefined);
   const request = await chrome.nextRequest();
@@ -849,7 +850,7 @@ test('pi: a 22 s capture measured on a live Chrome reaches the caller', async (t
   t.after(() => chrome.close());
   t.after(nativeIpcEnv(chrome.socketPath));
   const pi = makeMockPi();
-  chromeControllerPiExtension(pi as unknown as import("/Users/dst/dev/chrome-controller/node_modules/@earendil-works/pi-coding-agent/dist").ExtensionAPI);
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const outcome = pi.tools['chrome_capture_video'].execute('call_1', { tabId: 1, fps: 30, duration: 2 }, undefined);
   const request = await chrome.nextRequest();
