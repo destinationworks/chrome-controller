@@ -171,6 +171,7 @@ The extension accepts relay credentials only through its authenticated Native Me
 
 - [User & Developer Guide](docs/user-guide.md): In-depth walkthrough, configuration examples, and troubleshooting.
 - [Chrome Web Store Listing Text](docs/chrome-web-store-listing.md): Store listing description and metadata for Developer Console.
+- [Publishing to the Chrome Web Store](docs/store-publishing.md): `npm run store:publish` uploads the package and fills the listing from the repository.
 - [Chrome Web Store Item](https://chromewebstore.google.com/detail/p-agent-extension/gocbenlgkgeaiifofilndbnaeigpplca): Official extension store page.
 - [Developer Console Item Edit](https://chrome.google.com/webstore/devconsole/9a5c4d7a-94b2-4dd1-bc8b-676349c60d48/gocbenlgkgeaiifofilndbnaeigpplca/edit): Developer management console for this extension.
 

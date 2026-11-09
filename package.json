@@ -20,10 +20,11 @@
     "capture-store-screenshot": "node scripts/capture-store-screenshot.js",
     "generate-store-assets": "npm run generate-store-artwork && npm run capture-store-screenshot",
     "package": "npm run generate-icons && node scripts/package-extension.js",
+    "store:publish": "node scripts/store-publish.js",
     "mcp": "node dist/mcp.js",
-    "test": "NODE_ENV=test npx tsx --test src/native-host.test.ts src/chrome-wait.test.ts src/watchdog.test.ts src/server.test.ts src/index.test.ts src/index-ipc.test.ts src/mcp.test.ts src/store-assets.test.ts src/manifest.test.ts src/content-overlay.test.ts src/secure-extraction.test.ts src/extension-background.test.ts",
+    "test": "NODE_ENV=test npx tsx --test src/native-host.test.ts src/chrome-wait.test.ts src/watchdog.test.ts src/server.test.ts src/index.test.ts src/index-ipc.test.ts src/mcp.test.ts src/store-assets.test.ts src/manifest.test.ts src/content-overlay.test.ts src/secure-extraction.test.ts src/extension-background.test.ts src/store-publish.test.ts",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src test --max-warnings 0",
+    "lint": "eslint src test 'scripts/store-*.js' --max-warnings 0",
     "watchdog": "node dist/watchdog.js"
   },
   "pi": {
