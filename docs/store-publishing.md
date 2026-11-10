@@ -12,6 +12,7 @@ package is built from the committed `Chrome Extension/` folder.
 | Package | `--upload` | Uploads the ZIP through the Chrome Web Store API V2. Refuses a version that is not newer than the published one. |
 | Review | `--submit` | Submits the item for review through the API (`blockOnWarnings`), then fails unless the store reports a submitted state and the package version. |
 | Layout | `--inspect` | Lists the console's form controls, for fixing the field map after Google changes the console. Runs alone. |
+| Sign-in | `--sign-in` | Opens the publisher profile as plain Chrome for the one-time Google sign-in. Runs alone. |
 
 Flags combine and run in the order listing, upload, submit. With `--upload` or `--submit`,
 credentials and the version are checked before the console is touched:
@@ -44,9 +45,12 @@ profile in `~/.chrome-controller/store-publisher-profile` and drives it over the
 protocol on 127.0.0.1. Your everyday profile is not touched. Any local process could use
 that DevTools port while it is open, so the script closes this Chrome when the run ends.
 
-On the first `--diff`, `--listing` or `--inspect` run, sign in to that Chrome window with
-the Google account that owns the item. Google asks it to "Verify it's you" again from time to time; the
-run waits up to ten minutes for you to do that in the same window.
+Google refuses to sign in inside a browser driven over DevTools ("signin/rejected"), so sign
+in once with `npm run store:publish -- --sign-in`. It opens the same profile as plain Chrome
+on the console. Sign in with the account that owns the item, wait for the console to show the
+item, then quit that Chrome with Cmd+Q. Later runs reuse the saved session. When Google asks
+to "Verify it's you" again, the run waits up to ten minutes in its window; if Google rejects
+that sign-in too, repeat `--sign-in`.
 
 The field labels in `scripts/store-console.js` must match the console. A label that does
 not match exactly one control stops the run before anything is written; run `--inspect` and

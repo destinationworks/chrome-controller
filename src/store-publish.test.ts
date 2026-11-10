@@ -12,7 +12,7 @@ import {
 } from '../scripts/store-api.js';
 import { buildPackage, isNewerVersion, readZip } from '../scripts/store-package.js';
 import {
-  closePublisherChrome, consoleFieldPlan, editUrl, openConsoleTab, saveDraft, startPublisherChrome, syncFields,
+  closePublisherChrome, consoleFieldPlan, editUrl, openConsoleTab, openSignInChrome, profileInUse, saveDraft, startPublisherChrome, syncFields,
 } from '../scripts/store-console.js';
 import { parseArgs, runPublish } from '../scripts/store-publish.js';
 
@@ -415,6 +415,7 @@ test('opening the console waits while Google asks for sign-in, then requires the
   assert.match(lines[0], /verify the account in the publisher Chrome window/);
 
   await assert.rejects(openConsoleTab(fakeNavigatingPage(['https://accounts.google.com/x']) as never, target, { log: noLog, timeoutMs: -1, sleep: async () => {} }), /Timed out waiting for Google sign-in/);
+  await assert.rejects(openConsoleTab(fakeNavigatingPage(['https://accounts.google.com/v3/signin/rejected?x=1']) as never, target, { log: noLog, sleep: async () => {} }), /refused to sign in inside the automated publisher Chrome\. Run `npm run store:publish -- --sign-in`/);
   const closing = fakeNavigatingPage(['https://accounts.google.com/x']);
   await assert.rejects(openConsoleTab(closing as never, target, { log: noLog, sleep: async () => closing.close() }), /window was closed before Google sign-in finished/);
   await assert.rejects(openConsoleTab(fakeNavigatingPage([`${target}/privacy`]) as never, target, { log: noLog, sleep: async () => {} }), /instead of/);
@@ -436,6 +437,12 @@ test('the publisher Chrome starts on its own profile, is reused while it answers
     assert.deepEqual(await startPublisherChrome({ profileDir, chromeBinary: '/fake/chrome', spawnImpl, fetchImpl, sleep: async () => {} }), { port: 43211, started: false });
     assert.equal(spawned.length, 1, 'a running publisher Chrome is reused');
     await assert.rejects(startPublisherChrome({ profileDir, chromeBinary: '/fake/chrome', spawnImpl, fetchImpl: (async () => ({ ok: false })) as never, sleep: async () => {}, startupChecks: 2 }), /did not open its DevTools port/);
+
+    // A profile held by a plain Chrome (after --sign-in) cannot be driven; say so instead of launching into it.
+    fs.rmSync(path.join(profileDir, 'DevToolsActivePort'));
+    const before = spawned.length;
+    await assert.rejects(startPublisherChrome({ profileDir, chromeBinary: '/fake/chrome', spawnImpl, fetchImpl, sleep: async () => {}, isProfileInUse: () => true }), /open in a Chrome without automation .*quit that Chrome \(Cmd\+Q\)/);
+    assert.equal(spawned.length, before, 'nothing is launched into a profile another Chrome holds');
 
     const sent: string[] = [];
     await closePublisherChrome({ newBrowserCDPSession: async () => ({ send: async (method: string) => { sent.push(method); } }) } as never);
@@ -499,8 +506,8 @@ function publishDeps({ consoleDiffs = { '': ['Description'], privacy: [] as stri
 }
 
 test('options accept only the documented flags, and --inspect runs alone', () => {
-  assert.deepEqual(parseArgs([]), { diff: false, listing: false, upload: false, submit: false, inspect: false });
-  assert.deepEqual(parseArgs(['--upload', '--submit']), { diff: false, listing: false, upload: true, submit: true, inspect: false });
+  assert.deepEqual(parseArgs([]), { diff: false, listing: false, upload: false, submit: false, inspect: false, signIn: false });
+  assert.deepEqual(parseArgs(['--upload', '--submit']), { diff: false, listing: false, upload: true, submit: true, inspect: false, signIn: false });
   assert.throws(() => parseArgs(['--publish']), /Unknown option --publish/);
   assert.throws(() => parseArgs(['--inspect', '--listing']), /--inspect runs alone/);
 });
@@ -600,4 +607,44 @@ test('--inspect lists the controls on both tabs and closes the publisher Chrome'
   await runPublish(parseArgs(['--inspect']), deps);
   assert.deepEqual(calls, ['startChrome', 'open:listing', 'open:privacy', 'closeChrome', 'disconnect']);
   assert.equal(lines.filter((line) => line === '  textbox: Description').length, 2);
+});
+
+test('sign-in opens the profile as plain Chrome without a DevTools port, and refuses a profile already open', () => {
+  const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'store-profile-'));
+  try {
+    const spawned: string[][] = [];
+    const spawnImpl = ((binary: string, args: string[]) => { spawned.push([binary, ...args]); return { unref() {} }; }) as never;
+    openSignInChrome('https://console.example/edit', { profileDir, chromeBinary: '/fake/chrome', spawnImpl, isProfileInUse: () => false });
+    assert.deepEqual(spawned, [['/fake/chrome', `--user-data-dir=${profileDir}`, '--no-first-run', '--no-default-browser-check', 'https://console.example/edit']]);
+    assert.ok(!spawned[0].some((arg) => arg.startsWith('--remote-debugging')), 'Google refuses sign-in in a DevTools-driven browser');
+    assert.throws(() => openSignInChrome('https://console.example/edit', { profileDir, chromeBinary: '/fake/chrome', spawnImpl, isProfileInUse: () => true }), /already open/);
+    assert.equal(spawned.length, 1);
+  } finally {
+    fs.rmSync(profileDir, { recursive: true, force: true });
+  }
+});
+
+test('the profile counts as in use only while the process named by its lock is alive', () => {
+  const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'store-profile-'));
+  try {
+    assert.equal(profileInUse(profileDir), false, 'no lock');
+    fs.symlinkSync(`host.local-${process.pid}`, path.join(profileDir, 'SingletonLock'));
+    assert.equal(profileInUse(profileDir), true, 'lock held by a live process');
+    fs.rmSync(path.join(profileDir, 'SingletonLock'));
+    fs.symlinkSync('host.local-2147483646', path.join(profileDir, 'SingletonLock'));
+    assert.equal(profileInUse(profileDir), false, 'stale lock from a dead process');
+  } finally {
+    fs.rmSync(profileDir, { recursive: true, force: true });
+  }
+});
+
+test('--sign-in opens the console in the plain publisher profile without building or driving anything', async () => {
+  const opened: string[] = [];
+  const { deps, calls, lines } = publishDeps({ openSignInChrome: (url: string) => { opened.push(url); }, buildPackage: () => assert.fail('no package for sign-in') });
+  await runPublish(parseArgs(['--sign-in']), deps);
+  assert.deepEqual(opened, [`https://chrome.google.com/webstore/devconsole/${PUBLISHER}/${ITEM}/edit`]);
+  assert.deepEqual(calls, []);
+  assert.match(lines.join('\n'), /quit that Chrome \(Cmd\+Q\)/);
+  assert.throws(() => parseArgs(['--sign-in', '--diff']), /--sign-in runs alone/);
+  assert.equal(parseArgs(['--sign-in']).signIn, true);
 });

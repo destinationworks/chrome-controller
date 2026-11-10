@@ -38,6 +38,26 @@ export function consoleFieldPlan(listing) {
   ];
 }
 
+// Whether a Chrome process holds this profile, from the lock Chrome links to its pid.
+export function profileInUse(profileDir) {
+  try {
+    const pid = Number(fs.readlinkSync(path.join(profileDir, 'SingletonLock')).split('-').pop());
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Google refuses to sign in inside a browser driven over DevTools, so sign-in happens in
+// this profile opened as plain Chrome; automated runs then reuse the saved session.
+export function openSignInChrome(url, { profileDir = PROFILE_DIR, chromeBinary = CHROME_BINARY, spawnImpl = spawn, isProfileInUse = profileInUse } = {}) {
+  if (isProfileInUse(profileDir)) throw new Error('The publisher profile is already open; sign in in that window, or quit it (Cmd+Q) and run --sign-in again');
+  fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 });
+  spawnImpl(chromeBinary, [`--user-data-dir=${profileDir}`, '--no-first-run', '--no-default-browser-check', url], { detached: true, stdio: 'ignore' }).unref?.();
+}
+
 // Port of a Chrome already serving this profile, from the file Chrome writes on startup.
 function activePort(profileDir) {
   try {
@@ -61,10 +81,12 @@ async function answers(port, fetchImpl) {
 // can use that port while it is open, so callers close this Chrome when the run ends.
 export async function startPublisherChrome({
   profileDir = PROFILE_DIR, chromeBinary = CHROME_BINARY, spawnImpl = spawn, fetchImpl = fetch,
-  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), startupChecks = 60,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), startupChecks = 60, isProfileInUse = profileInUse,
 } = {}) {
   const running = activePort(profileDir);
   if (running && await answers(running, fetchImpl)) return { port: running, started: false };
+  // A second launch would only hand its window to the Chrome already holding the profile.
+  if (isProfileInUse(profileDir)) throw new Error('The publisher profile is open in a Chrome without automation (from --sign-in); quit that Chrome (Cmd+Q), then run again');
   fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 });
   fs.rmSync(path.join(profileDir, 'DevToolsActivePort'), { force: true });
   const child = spawnImpl(chromeBinary, [
@@ -87,6 +109,9 @@ export async function openConsoleTab(page, url, { log, timeoutMs = 10 * 60_000, 
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   let asked = false;
   for (const deadline = Date.now() + timeoutMs; new URL(page.url()).host === SIGN_IN_HOST;) {
+    if (new URL(page.url()).pathname.includes('/signin/rejected')) {
+      throw new Error('Google refused to sign in inside the automated publisher Chrome. Run `npm run store:publish -- --sign-in`, sign in there, quit that Chrome (Cmd+Q), then run again');
+    }
     if (!asked) {
       log('Google wants you to sign in or verify the account in the publisher Chrome window. Waiting...');
       asked = true;

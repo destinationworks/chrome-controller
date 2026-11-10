@@ -6,6 +6,7 @@
 //   npm run store:publish -- --upload         upload the package through the API
 //   npm run store:publish -- --submit         submit the uploaded package for review
 //   npm run store:publish -- --inspect        list the console's form controls (alone)
+//   npm run store:publish -- --sign-in        open the publisher profile for Google sign-in (alone)
 // Flags combine and run in the order listing, upload, submit. API steps need
 // CWS_CLIENT_ID, CWS_CLIENT_SECRET and CWS_REFRESH_TOKEN (see docs/store-publishing.md).
 
@@ -19,12 +20,12 @@ import { buildPackage, isNewerVersion } from './store-package.js';
 import * as consoleUi from './store-console.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const FLAGS = ['--diff', '--listing', '--upload', '--submit', '--inspect'];
+const FLAGS = ['--diff', '--listing', '--upload', '--submit', '--inspect', '--sign-in'];
 
 export function parseArgs(argv) {
   for (const arg of argv) if (!FLAGS.includes(arg)) throw new Error(`Unknown option ${arg}; expected ${FLAGS.join(', ')}`);
-  const options = Object.fromEntries(FLAGS.map((flag) => [flag.slice(2), argv.includes(flag)]));
-  if (options.inspect && argv.length > 1) throw new Error('--inspect runs alone');
+  const options = Object.fromEntries(FLAGS.map((flag) => [flag.slice(2).replace(/-(\w)/g, (_, letter) => letter.toUpperCase()), argv.includes(flag)]));
+  for (const alone of ['--inspect', '--sign-in']) if (argv.includes(alone) && argv.length > 1) throw new Error(`${alone} runs alone`);
   return options;
 }
 
@@ -77,6 +78,11 @@ async function syncConsole(deps, listing, write) {
 export async function runPublish(options, deps) {
   const { log } = deps;
   const listing = parseListing(deps.readListing());
+  if (options.signIn) {
+    deps.openSignInChrome(consoleUi.editUrl(listing));
+    log('Opened the publisher profile without automation. Sign in as the item owner until the console shows the item, then quit that Chrome (Cmd+Q).');
+    return { listing };
+  }
   const pkg = deps.buildPackage();
   const problems = validateListing(listing, pkg.manifest);
   if (problems.length > 0) throw new Error(`Listing file does not match the package:\n- ${problems.join('\n- ')}`);
@@ -149,6 +155,7 @@ async function main() {
     startPublisherChrome: () => consoleUi.startPublisherChrome(),
     connectOverCDP: (endpoint) => chromium.connectOverCDP(endpoint),
     closePublisherChrome: consoleUi.closePublisherChrome,
+    openSignInChrome: (url) => consoleUi.openSignInChrome(url),
     openConsoleTab: consoleUi.openConsoleTab,
     syncFields: consoleUi.syncFields,
     saveDraft: consoleUi.saveDraft,
