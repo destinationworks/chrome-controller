@@ -79,6 +79,7 @@ While actively working, reread `user-updates.md` for new instructions at least o
 ## Chrome Web Store
 
 - Listing text and Privacy practices answers live in `docs/chrome-web-store-listing.md`; publish them and the package with `npm run store:publish` (see `docs/store-publishing.md`). Never type listing text only into the console: it is lost the next time the listing is replaced.
+- The API credentials live in the macOS login Keychain, service `chrome-controller-store-api` (`client_id`, `client_secret`, `refresh_token`). `npm run store:publish -- --authorize` renews the refresh token through a loopback consent flow. Never route the client secret through a web form such as the OAuth Playground, or through a store that forgets it (the secure-clipboard vault is in-memory, at most 24 hours).
 
 ## Issues and PRs
 

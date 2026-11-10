@@ -7,8 +7,10 @@
 //   npm run store:publish -- --submit         submit the uploaded package for review
 //   npm run store:publish -- --inspect        list the console's form controls (alone)
 //   npm run store:publish -- --sign-in        open the publisher profile for Google sign-in (alone)
-// Flags combine and run in the order listing, upload, submit. API steps need
-// CWS_CLIENT_ID, CWS_CLIENT_SECRET and CWS_REFRESH_TOKEN (see docs/store-publishing.md).
+//   npm run store:publish -- --authorize      authorize the API and keep its refresh token (alone)
+// Flags combine and run in the order listing, upload, submit. API steps read their
+// credentials from the macOS Keychain, or from CWS_CLIENT_ID, CWS_CLIENT_SECRET and
+// CWS_REFRESH_TOKEN when those are set (see docs/store-publishing.md).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -16,18 +18,20 @@ import { fileURLToPath } from 'node:url';
 
 import { parseListing, validateListing } from './store-listing.js';
 import * as api from './store-api.js';
+import { apiCredentials, clientCredentials, keychain, KEYCHAIN_ACCOUNTS, KEYCHAIN_SERVICE } from './store-credentials.js';
+import { authorize } from './store-oauth.js';
 import { buildPackage, isNewerVersion } from './store-package.js';
 import * as consoleUi from './store-console.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SAVE_CHECKS = 5;
 const SAVE_CHECK_INTERVAL_MS = 2_000;
-const FLAGS = ['--diff', '--listing', '--upload', '--submit', '--inspect', '--sign-in'];
+const FLAGS = ['--diff', '--listing', '--upload', '--submit', '--inspect', '--sign-in', '--authorize'];
 
 export function parseArgs(argv) {
   for (const arg of argv) if (!FLAGS.includes(arg)) throw new Error(`Unknown option ${arg}; expected ${FLAGS.join(', ')}`);
   const options = Object.fromEntries(FLAGS.map((flag) => [flag.slice(2).replace(/-(\w)/g, (_, letter) => letter.toUpperCase()), argv.includes(flag)]));
-  for (const alone of ['--inspect', '--sign-in']) if (argv.includes(alone) && argv.length > 1) throw new Error(`${alone} runs alone`);
+  for (const alone of ['--inspect', '--sign-in', '--authorize']) if (argv.includes(alone) && argv.length > 1) throw new Error(`${alone} runs alone`);
   return options;
 }
 
@@ -92,6 +96,17 @@ export async function runPublish(options, deps) {
     log('Opened the publisher profile without automation. Sign in as the item owner until the console shows the item, then quit that Chrome (Cmd+Q).');
     return { listing };
   }
+  if (options.authorize) {
+    // The new token must read this item before it replaces whatever the Keychain holds, so
+    // authorizing with the wrong Google account never breaks a working setup.
+    const client = clientCredentials(deps.env, deps.keychain);
+    const refreshToken = await deps.authorize(client, { log });
+    const token = await deps.fetchAccessToken({ ...client, refreshToken });
+    const status = await deps.fetchStatus({ token, publisherId: listing.publisherId, itemId: listing.itemId });
+    deps.keychain.write(KEYCHAIN_ACCOUNTS.refreshToken, refreshToken);
+    log(`Authorized: the token reads item ${listing.itemId} (store serves ${api.publishedVersion(status) ?? 'nothing yet'}); refresh token saved to the Keychain service "${KEYCHAIN_SERVICE}"`);
+    return { listing, status };
+  }
   const pkg = deps.buildPackage();
   const problems = validateListing(listing, pkg.manifest);
   if (problems.length > 0) throw new Error(`Listing file does not match the package:\n- ${problems.join('\n- ')}`);
@@ -113,7 +128,7 @@ export async function runPublish(options, deps) {
   // upload never leaves a half-published draft behind.
   let ids;
   if (options.upload || options.submit) {
-    const token = await deps.fetchAccessToken(api.credentialsFromEnvironment(deps.env));
+    const token = await deps.fetchAccessToken(apiCredentials(deps.env, deps.keychain));
     ids = { token, publisherId: listing.publisherId, itemId: listing.itemId };
     const before = await deps.fetchStatus(ids);
     const live = api.publishedVersion(before);
@@ -158,6 +173,8 @@ async function main() {
   await runPublish(options, {
     log: (line) => console.log(line),
     env: process.env,
+    keychain: keychain(),
+    authorize: (client, options) => authorize(client, options),
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     readListing: () => fs.readFileSync(path.join(repoRoot, 'docs', 'chrome-web-store-listing.md'), 'utf8'),
     buildPackage: () => buildPackage({ repoRoot, outDir: path.join(repoRoot, 'dist', 'store') }),

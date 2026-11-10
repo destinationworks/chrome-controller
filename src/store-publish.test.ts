@@ -138,7 +138,7 @@ function fakeFetch(responses: Array<{ status?: number; body?: unknown; raw?: str
 const ids = { publisherId: PUBLISHER, itemId: ITEM };
 
 test('credentials must all be present and name the variables that are missing', () => {
-  assert.throws(() => credentialsFromEnvironment({ CWS_CLIENT_ID: 'id' }), /missing: CWS_CLIENT_SECRET, CWS_REFRESH_TOKEN/);
+  assert.throws(() => credentialsFromEnvironment({ CWS_CLIENT_ID: 'id' }), /incomplete: CWS_CLIENT_SECRET, CWS_REFRESH_TOKEN unset/);
   assert.deepEqual(credentialsFromEnvironment({ CWS_CLIENT_ID: 'i', CWS_CLIENT_SECRET: 's', CWS_REFRESH_TOKEN: 'r' }), { clientId: 'i', clientSecret: 's', refreshToken: 'r' });
 });
 
@@ -493,8 +493,9 @@ test('the publisher Chrome starts on its own profile, is reused while it answers
 const pkgFixture = { path: '/tmp/x.zip', commit: 'a'.repeat(40), version: '2.0.1', manifest: fixtureManifest, entries: ['manifest.json'], bytes: Buffer.from('zip'), sha256: 'f'.repeat(64) };
 
 // Fakes that check what they are given: wrong ids, bytes, URLs or tokens fail the test.
-function publishDeps({ consoleDiffs = { '': ['Description'], privacy: [] as string[] }, keepsSaves = true, staleReadsAfterSave = 0, ...overrides }: Record<string, any> = {}) {
+function publishDeps({ consoleDiffs = { '': ['Description'], privacy: [] as string[] }, keepsSaves = true, staleReadsAfterSave = 0, keychainEntries = {} as Record<string, string>, ...overrides }: Record<string, any> = {}) {
   const calls: string[] = [];
+  const keychainWrites: Array<[string, string]> = [];
   const lines: string[] = [];
   let currentTab = '';
   const saved = new Set<string>();
@@ -509,6 +510,11 @@ function publishDeps({ consoleDiffs = { '': ['Description'], privacy: [] as stri
   const deps = {
     log: (line: string) => lines.push(line),
     env: { CWS_CLIENT_ID: 'i', CWS_CLIENT_SECRET: 's', CWS_REFRESH_TOKEN: 'r' },
+    keychain: {
+      read: (account: string) => keychainEntries[account],
+      write: (account: string, value: string) => { calls.push(`keychain:${account}`); keychainWrites.push([account, value]); keychainEntries[account] = value; },
+    },
+    authorize: async () => assert.fail('authorize is only for --authorize'),
     sleep: async () => {},
     readListing: () => listingFixture(),
     buildPackage: () => pkgFixture,
@@ -542,14 +548,17 @@ function publishDeps({ consoleDiffs = { '': ['Description'], privacy: [] as stri
     publishItem: async (request: Record<string, unknown>) => { expectIds(request); calls.push('publish'); return { state: 'PENDING_REVIEW', warningInfo: { warnings: [{ reason: 'W1', description: 'synthetic warning' }] } }; },
     ...overrides,
   };
-  return { deps, calls, lines };
+  return { deps, calls, lines, keychainWrites };
 }
 
-test('options accept only the documented flags, and --inspect runs alone', () => {
-  assert.deepEqual(parseArgs([]), { diff: false, listing: false, upload: false, submit: false, inspect: false, signIn: false });
-  assert.deepEqual(parseArgs(['--upload', '--submit']), { diff: false, listing: false, upload: true, submit: true, inspect: false, signIn: false });
+test('options accept only the documented flags, and --inspect, --sign-in and --authorize run alone', () => {
+  const none = { diff: false, listing: false, upload: false, submit: false, inspect: false, signIn: false, authorize: false };
+  assert.deepEqual(parseArgs([]), none);
+  assert.deepEqual(parseArgs(['--upload', '--submit']), { ...none, upload: true, submit: true });
+  assert.deepEqual(parseArgs(['--authorize']), { ...none, authorize: true });
   assert.throws(() => parseArgs(['--publish']), /Unknown option --publish/);
   assert.throws(() => parseArgs(['--inspect', '--listing']), /--inspect runs alone/);
+  assert.throws(() => parseArgs(['--upload', '--authorize']), /--authorize runs alone/);
 });
 
 test('the default check validates and packages without a browser or the API', async () => {
@@ -699,4 +708,49 @@ test('--sign-in opens the console in the plain publisher profile without buildin
   assert.match(lines.join('\n'), /quit that Chrome \(Cmd\+Q\)/);
   assert.throws(() => parseArgs(['--sign-in', '--diff']), /--sign-in runs alone/);
   assert.equal(parseArgs(['--sign-in']).signIn, true);
+});
+
+test('--upload reads the API credentials from the Keychain when no CWS variable is set', async () => {
+  const { deps, calls } = publishDeps({ env: {}, keychainEntries: { client_id: 'i', client_secret: 's', refresh_token: 'r' } });
+  await runPublish(parseArgs(['--upload']), deps);
+  assert.deepEqual(calls, ['token', 'status', 'upload', 'status']);
+});
+
+test('--authorize gets a token for the Keychain client, proves it reads the item, then stores it', async () => {
+  const authorized: unknown[] = [];
+  const { deps, calls, lines, keychainWrites } = publishDeps({
+    env: {},
+    keychainEntries: { client_id: 'ki', client_secret: 'ks', refresh_token: 'old' },
+    buildPackage: () => assert.fail('no package for --authorize'),
+    authorize: async (client: unknown, options: { log: unknown }) => { authorized.push(client); assert.equal(typeof options.log, 'function'); calls.push('authorize'); return 'new-refresh'; },
+    fetchAccessToken: async (credentials: unknown) => { assert.deepEqual(credentials, { clientId: 'ki', clientSecret: 'ks', refreshToken: 'new-refresh' }); calls.push('token'); return 'token'; },
+  });
+  await runPublish(parseArgs(['--authorize']), deps);
+  assert.deepEqual(authorized, [{ clientId: 'ki', clientSecret: 'ks' }]);
+  assert.deepEqual(calls, ['authorize', 'token', 'status', 'keychain:refresh_token'], 'stored only after the status call succeeded');
+  assert.deepEqual(keychainWrites, [['refresh_token', 'new-refresh']]);
+  const log = lines.join('\n');
+  assert.match(log, new RegExp(`Authorized: the token reads item ${ITEM} \\(store serves 2\\.0\\.0\\); refresh token saved to the Keychain service "chrome-controller-store-api"`));
+  assert.ok(!log.includes('new-refresh') && !log.includes('ks'), 'no secret is logged');
+});
+
+test('--authorize keeps the stored token when the new one cannot read the item', async () => {
+  const { deps, keychainWrites } = publishDeps({
+    env: {},
+    keychainEntries: { client_id: 'ki', client_secret: 'ks', refresh_token: 'old' },
+    authorize: async () => 'other-account-token',
+    fetchAccessToken: async () => 'token',
+    fetchStatus: async () => { throw new Error('Status fetch failed with HTTP 403: The caller does not have permission'); },
+  });
+  await assert.rejects(runPublish(parseArgs(['--authorize']), deps), /HTTP 403/);
+  assert.deepEqual(keychainWrites, []);
+});
+
+test('--authorize stops before opening an authorization when CWS variables are set or the client is missing', async () => {
+  const overridden = publishDeps({ keychainEntries: { client_id: 'ki', client_secret: 'ks' } });
+  await assert.rejects(runPublish(parseArgs(['--authorize']), overridden.deps), /CWS_CLIENT_ID, CWS_CLIENT_SECRET, CWS_REFRESH_TOKEN would override it on later runs/);
+  assert.deepEqual(overridden.calls, []);
+  const noClient = publishDeps({ env: {}, keychainEntries: { client_id: 'ki' } });
+  await assert.rejects(runPublish(parseArgs(['--authorize']), noClient.deps), /OAuth client is missing from the Keychain service "chrome-controller-store-api": client_secret/);
+  assert.deepEqual(noClient.calls, []);
 });

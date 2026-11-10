@@ -1,0 +1,22 @@
+# 2026-11-11 — Store API authorization uses a loopback flow, not the OAuth Playground
+
+- **Status:** Resolved
+- **Task/context:** Setting up Chrome Web Store API V2 credentials so `npm run store:publish -- --upload --submit` can run unattended (PR #18).
+- **Unexpected observation or failure:** The documented setup (a Web application client plus the OAuth 2.0 Playground) needs the client secret typed into the Playground's "Use your own OAuth credentials" form. An agent must not enter secrets into web fields, and a human doing it pastes the secret through the clipboard into a third-party page.
+- **Evidence:** The Playground form has fields for client ID and client secret; there is no other way to get a refresh token from it for your own client. The Cloud Console also needed the Google account that owns the item: in the Chrome Controller profile only other Google accounts were signed in, and `authuser=<email>` silently fell back to account 0, which asked for a password.
+- **Approaches tried:**
+  - **Attempt:** Follow the Playground steps.
+    - **Outcome:** Did not work
+    - **Why:** It requires typing the secret into a web form.
+  - **Attempt:** Drive the Cloud Console in the user's everyday Chrome with Chrome Controller.
+    - **Outcome:** Did not work
+    - **Why:** The owning account was not signed in to that profile; the publisher profile (`~/.chrome-controller/store-publisher-profile`, signed in once with `--sign-in`) was, and Playwright over CDP drove the Cloud Console and the consent screen there without a new sign-in.
+  - **Attempt:** A Desktop app client and `npm run store:publish -- --authorize`: a one-time server on 127.0.0.1, PKCE (S256), state check, code exchange in-process.
+    - **Outcome:** Worked
+    - **Why:** Desktop clients accept any loopback port, and the secret never leaves the process that reads it from the Keychain. The client secret was read from the creation dialog by a script and piped to `security -i` on stdin, so it never reached a log, argv or the agent's context.
+- **Root cause:** The Playground is built for trying Google APIs by hand, not for scripted credential setup.
+- **Resolution:** `scripts/store-oauth.js` implements the loopback flow; `--authorize` checks that the new token can read the item before saving its refresh token in the Keychain (`scripts/store-credentials.js`). `docs/store-publishing.md` now describes the Desktop client and `--authorize`.
+- **Verification:** The live run printed "Authorized: the token reads item gocbenlgkgeaiifofilndbnaeigpplca (store serves 1.3.0)". A separate run loaded all three values from the Keychain, refreshed a token and fetched the item status. `src/store-authorize.test.ts` runs the real loopback server: PKCE challenge equals S256 of the verifier, foreign state, refusals and missing codes exchange nothing, and the server is closed afterwards.
+- **Prevention/follow-up:** AGENTS.md (Chrome Web Store) forbids routing the client secret through a web form.
+- **Reusable learning:** For OAuth refresh tokens of your own Google client, use a Desktop app client with a loopback redirect and PKCE from a local script; never a web form that wants the secret.
+- **References:** `scripts/store-oauth.js`, `scripts/store-credentials.js`, `src/store-authorize.test.ts`, `docs/store-publishing.md`.

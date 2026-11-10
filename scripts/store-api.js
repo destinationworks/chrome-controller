@@ -1,7 +1,7 @@
 // Chrome Web Store API V2: package upload, submission status and publish. The API cannot edit
 // listing text; scripts/store-console.js fills those fields in the Developer Console.
-// Credentials come from the caller (environment, normally via `op run`) and never appear in
-// errors or logs.
+// Credentials come from the caller (scripts/store-credentials.js: environment or Keychain) and
+// never appear in errors or logs.
 
 const API_ORIGIN = 'https://chromewebstore.googleapis.com';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -10,7 +10,7 @@ export const CREDENTIAL_VARIABLES = ['CWS_CLIENT_ID', 'CWS_CLIENT_SECRET', 'CWS_
 export function credentialsFromEnvironment(env) {
   const missing = CREDENTIAL_VARIABLES.filter((name) => !env[name]);
   if (missing.length > 0) {
-    throw new Error(`Chrome Web Store API credentials are missing: ${missing.join(', ')}. Run through \`op run --env-file=.env.store\` (see docs/store-publishing.md).`);
+    throw new Error(`Chrome Web Store API credentials are incomplete: ${missing.join(', ')} unset. Set all three, or none to use the Keychain (see docs/store-publishing.md).`);
   }
   return { clientId: env.CWS_CLIENT_ID, clientSecret: env.CWS_CLIENT_SECRET, refreshToken: env.CWS_REFRESH_TOKEN };
 }
@@ -20,7 +20,7 @@ function itemPath(publisherId, itemId) {
 }
 
 // Google's error body says what was wrong; the request (and its token) is never echoed.
-async function readJson(response, what) {
+export async function readJson(response, what) {
   const text = await response.text();
   let body;
   try { body = text ? JSON.parse(text) : {}; } catch { body = undefined; }

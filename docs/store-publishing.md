@@ -13,12 +13,13 @@ package is built from the committed `Chrome Extension/` folder.
 | Review | `--submit` | Submits the item for review through the API (`blockOnWarnings`), then fails unless the store reports a submitted state and the package version. |
 | Layout | `--inspect` | Lists the console's form controls, for fixing the field map after Google changes the console. Runs alone. |
 | Sign-in | `--sign-in` | Opens the publisher profile as plain Chrome for the one-time Google sign-in. Runs alone. |
+| API access | `--authorize` | Runs Google's consent flow for the API, checks the new token can read the item, and saves its refresh token in the Keychain. Runs alone. |
 
 Flags combine and run in the order listing, upload, submit. With `--upload` or `--submit`,
 credentials and the version are checked before the console is touched:
 
 ```bash
-op run --env-file=.env.store -- npm run store:publish -- --listing --upload --submit
+npm run store:publish -- --listing --upload --submit
 ```
 
 Every console field on both tabs is located before any is written, so a changed layout
@@ -58,26 +59,42 @@ update the labels.
 
 ### Package and review: API credentials
 
-1. In Google Cloud, create or pick a project and enable the **Chrome Web Store API**.
-2. Configure the OAuth consent screen and set the app to **In production**. A consent
-   screen left in Testing issues refresh tokens that expire after seven days. An unverified
-   app is fine: the API is meant for the developer's own items.
-3. Create an OAuth client of type **Web application** with the redirect URI
-   `https://developers.google.com/oauthplayground`.
-4. In the [OAuth 2.0 Playground](https://developers.google.com/oauthplayground), choose
-   "Use your own OAuth credentials", authorize the scope
-   `https://www.googleapis.com/auth/chromewebstore` with the account that owns the item, and
-   exchange the code for tokens.
-5. Store the client ID, client secret and refresh token in a 1Password item, copy
-   `.env.store.example` to `.env.store`, and point its references at that item.
+The API steps read three values from the macOS login Keychain, service
+`chrome-controller-store-api`: `client_id`, `client_secret` and `refresh_token`. When
+`CWS_CLIENT_ID`, `CWS_CLIENT_SECRET` and `CWS_REFRESH_TOKEN` are set, they are used
+instead (CI, or `op run --env-file=.env.store` from `.env.store.example`); set all three or
+none. The script never prints the client secret or the refresh token.
 
-The script reads the credentials from the environment and never prints them.
+1. Create or pick a Google Cloud project and enable the Chrome Web Store API:
+   `gcloud services enable chromewebstore.googleapis.com --project <project>`.
+2. In Google Auth Platform, create the branding: an app name, your support and contact
+   email, and the **External** audience. Then fill **Application home page**, **Application
+   privacy policy link** and an **Authorised domain** (the repository's GitHub URLs and
+   `github.com` work): Google keeps **Publish app** disabled until these are set. Publish
+   the app so Audience reads **In production**. An app left in Testing gets refresh tokens
+   that expire after seven days. An unverified app is fine: the API is meant for the
+   developer's own items.
+3. Create an OAuth client of type **Desktop app**. Google shows its secret only once, in the
+   creation dialog. Store the ID and the secret; with `-w` last, `security` prompts for each
+   value, so neither lands in shell history or the process list:
+
+   ```bash
+   security add-generic-password -U -s chrome-controller-store-api -a client_id -w
+   security add-generic-password -U -s chrome-controller-store-api -a client_secret -w
+   ```
+
+4. Run `npm run store:publish -- --authorize` and open the URL it prints in a browser
+   signed in as the item owner (the publisher profile is). Pick the account, continue past
+   "Google hasn't verified this app" (Advanced, then Go to the app), and allow access.
+   Google returns the browser to a one-time server on 127.0.0.1, and the script exchanges
+   the code with PKCE. It checks that the new token can read the item, and only then saves
+   the refresh token in the Keychain. Run it again whenever Google revokes the token.
 
 ## A release
 
 1. Bump the version in `Chrome Extension/manifest.json`, update "What's new" in the listing
    file, and merge.
 2. `npm run store:publish -- --diff` and read the differences and the package digest.
-3. `op run --env-file=.env.store -- npm run store:publish -- --listing --upload --submit`.
+3. `npm run store:publish -- --listing --upload --submit`.
 4. Review and public availability follow later; the final status line shows the submitted
    state, not publication.
