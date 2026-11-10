@@ -3,10 +3,10 @@
 - **Status:** Partial
 - **Task/context:** Automating Chrome Web Store publishing (`scripts/store-publish.js`) so the listing text in `docs/chrome-web-store-listing.md` reaches the console without hand-pasting.
 - **Unexpected observation or failure:** Three earlier agent sessions failed to edit the Developer Console through browser-extension tooling, and the listing summary could not be changed in the console at all.
-- **Evidence:** A Codex session on 2026-10-29 recorded that its browser extension tool refused to drive the console; the 2026-09-20 edit was made with OS-level computer use instead. Two independent transcript searches report the console's summary as "Summary from package", read from the manifest `description`. The Chrome Web Store API V2 offers upload, status, publish, cancel, rollback and rollout percentage only; no listing-text method exists. In this session the console tab stopped at Google's "Verify it's you" page, so the extension refusal was not re-observed live.
+- **Evidence:** A Codex session on 2026-10-29 recorded that its browser extension tool refused to drive the console; the 2026-09-20 edit was made with OS-level computer use instead. Two independent transcript searches report the console's summary as "Summary from package", read from the manifest `description`. The Chrome Web Store API V2 offers upload, status, publish, cancel, rollback and rollout percentage only; no listing-text method exists. Confirmed live on 2026-11-10: in the Chrome profile signed in as the publisher, with the console loaded, Chrome Controller's `evaluateOnPage` on `.../devconsole/<publisher>/<item>/edit` failed with "The extensions gallery cannot be scripted."
 - **Approaches tried:**
   - **Attempt:** Drive the console with Chrome Controller in the everyday profile.
-    - **Outcome:** Did not work (earlier sessions); not re-tested past sign-in here.
+    - **Outcome:** Did not work (earlier sessions, and re-tested live in the signed-in publisher profile).
     - **Why:** Chrome restricts extensions on Web Store URLs, and `chrome.google.com/webstore/devconsole` sits under the restricted Web Store path.
   - **Attempt:** Edit listing text through the API.
     - **Outcome:** Did not work.
@@ -16,7 +16,7 @@
     - **Why:** The DevTools protocol is not subject to the extension restriction, and a separate profile keeps the everyday profile untouched.
 - **Root cause:** Chrome's extension restriction on Web Store pages, and the console sourcing the summary from the package.
 - **Resolution:** The manifest `description` now equals the listing summary and validation refuses a mismatch. Text goes through the publisher profile; the package and review go through the API.
-- **Verification:** `src/store-publish.test.ts`. Live: pending a signed-in `npm run store:publish -- --inspect` to confirm the labels, then a dry run.
+- **Verification:** `src/store-publish.test.ts`; the live "extensions gallery cannot be scripted" refusal above. Still pending: a signed-in `npm run store:publish -- --inspect` to confirm the console labels, then `--diff`.
 - **Prevention/follow-up:** Run `--inspect` after any console redesign; a label that matches zero or several controls stops the run before writing.
 - **Reusable learning:** Do not plan extension-based automation for Web Store pages. Change the store summary through the manifest, never the console.
 - **References:** `scripts/store-console.js`, `scripts/store-api.js`, `docs/store-publishing.md`, `docs/leanings/2026-10-31-store-listing-text-lived-only-in-the-console.md`.
