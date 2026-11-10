@@ -20,6 +20,8 @@ import { buildPackage, isNewerVersion } from './store-package.js';
 import * as consoleUi from './store-console.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const SAVE_CHECKS = 5;
+const SAVE_CHECK_INTERVAL_MS = 2_000;
 const FLAGS = ['--diff', '--listing', '--upload', '--submit', '--inspect', '--sign-in'];
 
 export function parseArgs(argv) {
@@ -66,8 +68,15 @@ async function syncConsole(deps, listing, write) {
       await deps.openConsoleTab(page, url, { log });
       await deps.syncFields(page, tabFields, { dryRun: false, log });
       await deps.saveDraft(page);
-      await deps.openConsoleTab(page, url, { log });
-      const unsaved = await deps.syncFields(page, tabFields, { dryRun: true, log });
+      // The console finishes saving after the click returns, so a reload right away can still
+      // show the old text; re-read a few times before calling the save lost.
+      let unsaved = [];
+      for (let attempt = 0; attempt < SAVE_CHECKS; attempt += 1) {
+        if (attempt > 0) await deps.sleep(SAVE_CHECK_INTERVAL_MS);
+        await deps.openConsoleTab(page, url, { log });
+        unsaved = await deps.syncFields(page, tabFields, { dryRun: true, log });
+        if (unsaved.length === 0) break;
+      }
       if (unsaved.length > 0) throw new Error(`The console did not keep the saved ${tabName(tab)} fields: ${unsaved.map((change) => change.label).join(', ')}`);
       log(`${tabName(tab)} tab: saved as a draft and read back`);
     }

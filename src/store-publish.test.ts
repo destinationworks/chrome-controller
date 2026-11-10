@@ -12,7 +12,7 @@ import {
 } from '../scripts/store-api.js';
 import { buildPackage, isNewerVersion, readZip } from '../scripts/store-package.js';
 import {
-  closePublisherChrome, consoleFieldPlan, editUrl, openConsoleTab, openSignInChrome, profileInUse, saveDraft, startPublisherChrome, syncFields,
+  closePublisherChrome, consoleFieldPlan, editUrl, inspectControls, labelPattern, openConsoleTab, openSignInChrome, profileInUse, saveDraft, startPublisherChrome, syncFields,
 } from '../scripts/store-console.js';
 import { parseArgs, runPublish } from '../scripts/store-publish.js';
 
@@ -292,32 +292,39 @@ test('version comparison is numeric per component, as Chrome compares them', () 
 
 // ── Developer Console ─────────────────────────────────────────────────────────
 
-type Control = { value: string; fills: number; ignoreFill?: boolean; tag?: string };
-// A console page reduced to labelled controls. getByRole(role, { name, exact }) finds the
-// controls registered under that role and label; only exact lookups are allowed, as the
-// script must never match a field by a substring of its label.
+type Control = { value: string; fills: number; ignoreFill?: boolean; tag?: string; optional?: boolean };
+// A console page reduced to labelled controls with the accessible names the live console
+// gives them (recorded 2026-11-10): required fields end in "*", and a combobox's name ends
+// with its current value, e.g. "Category* Developer Tools". getByRole accepts a RegExp for
+// fields and only an exact string for options, so a field is never matched by a substring.
 function fakeConsolePage(controls: Array<[string, string, string, Partial<Control>?]>, options: string[] = ['Developer Tools', 'English']) {
   const registry = [
     ...controls.map(([role, name, value, extra]) => ({ role, name, state: { value, fills: 0, ...extra } as Control })),
     ...options.map((name) => ({ role: 'option', name, state: { value: '', fills: 0 } as Control })),
   ];
+  const accessibleName = (control: typeof registry[number]) => control.role === 'option'
+    ? control.name
+    // A native <select> is named by its label alone; the console's own comboboxes add the value.
+    : `${control.name}${control.state.optional ? '' : '*'}${control.role === 'combobox' && control.state.tag !== 'SELECT' && control.state.value ? ` ${control.state.value}` : ''}`;
   let openSelect: Control | undefined;
   const clicks: string[] = [];
   const page = {
-    getByRole(role: string, query: { name: string; exact?: boolean }) {
-      assert.equal(query.exact, true, `lookup of "${query.name}" must be exact`);
-      const matches = registry.filter((control) => control.role === role && control.name === query.name);
+    getByRole(role: string, query: { name: string | RegExp; exact?: boolean }) {
+      if (typeof query.name === 'string') assert.equal(query.exact, true, `lookup of "${query.name}" must be exact`);
+      const matches = registry.filter((control) => control.role === role
+        && (query.name instanceof RegExp ? query.name.test(accessibleName(control)) : accessibleName(control) === query.name));
       return {
         count: async () => matches.length,
         inputValue: async () => matches[0].state.value,
         evaluate: async (fn: (node: unknown) => string) => fn(matches[0].state.tag === 'SELECT'
           ? { tagName: 'SELECT', selectedOptions: [{ textContent: ` ${matches[0].state.value} ` }], innerText: 'Workflow\nDeveloper Tools\nEducation' }
-          : { tagName: 'DIV', innerText: ` ${matches[0].state.value}\n` }),
+          : { tagName: 'DIV', innerText: `${matches[0].name}\n${matches[0].state.value}` }),
+        ariaSnapshot: async () => `- ${role} "${accessibleName(matches[0]).replace(/"/g, '\\"')}"`,
         fill: async (value: string) => { matches[0].state.fills += 1; if (!matches[0].state.ignoreFill) matches[0].state.value = value; },
         click: async () => {
-          clicks.push(`${role}:${query.name}`);
+          clicks.push(`${role}:${matches[0].name}`);
           if (role === 'combobox') openSelect = matches[0].state;
-          else if (role === 'option' && openSelect) { openSelect.value = query.name; openSelect.fills += 1; }
+          else if (role === 'option' && openSelect) { openSelect.value = String(query.name); openSelect.fills += 1; }
         },
       };
     },
@@ -346,14 +353,14 @@ test('the console plan routes every listing value to its own field', () => {
 });
 
 test('a dry run reports differing fields and writes none', async () => {
-  const { page, state } = fakeConsolePage([['textbox', 'Description', 'old text'], ['textbox', 'Homepage URL', 'https://example.com']]);
+  const { page, state } = fakeConsolePage([['textbox', 'Description', 'old text'], ['textbox', 'Homepage URL', 'https://example.com', { optional: true }]]);
   const changes = await syncFields(page, [field('Description', 'new text'), field('Homepage URL', 'https://example.com')], { dryRun: true, log: noLog });
   assert.deepEqual(changes, [{ label: 'Description', from: 'old text', to: 'new text' }]);
   assert.equal(state('Description').fills, 0);
 });
 
 test('a write updates only differing fields, selects options and verifies each by reading back', async () => {
-  const { page, state, clicks } = fakeConsolePage([['textbox', 'Description', 'old'], ['textbox', 'Support URL', 'same'], ['combobox', 'Category', 'Workflow', { tag: 'SELECT' }]]);
+  const { page, state, clicks } = fakeConsolePage([['textbox', 'Description', 'old'], ['textbox', 'Support URL', 'same', { optional: true }], ['combobox', 'Category', 'Workflow', { tag: 'SELECT' }]]);
   const changes = await syncFields(page, [field('Description', 'new'), field('Support URL', 'same'), field('Category', 'Developer Tools', 'select')], { dryRun: false, log: noLog });
   assert.deepEqual(changes.map((change) => change.label), ['Description', 'Category']);
   assert.equal(state('Description').value, 'new');
@@ -367,12 +374,41 @@ test('a select reads its displayed value, not every option it offers', async () 
   assert.deepEqual(await syncFields(page, [field('Category', 'Developer Tools', 'select'), field('Language', 'English', 'select')], { dryRun: true, log: noLog }), []);
 });
 
+test('field labels match the console\'s names with "*" and combobox values, but never a longer label', () => {
+  const text = labelPattern(field('Description', ''));
+  assert.ok(text.test('Description*') && text.test('Description'));
+  assert.ok(!text.test('Description of changes') && !text.test('Short Description*') && !text.test('Description* x'));
+  const select = labelPattern(field('Category', '', 'select'));
+  assert.ok(select.test('Category* Developer Tools') && select.test('Category') && select.test('Category*'));
+  assert.ok(!select.test('Categoryx') && !select.test('Subcategory* Tools'));
+  assert.ok(labelPattern(field('Privacy policy URL', '')).test('Privacy policy URL*'));
+  assert.ok(!labelPattern(field('a.b', '')).test('aXb'), 'label punctuation is literal');
+});
+
+test('a longer label sharing the field\'s prefix is not mistaken for it', async () => {
+  const { page, state } = fakeConsolePage([['textbox', 'Description', 'old'], ['textbox', 'Description of changes', 'keep', { optional: true }]]);
+  await syncFields(page, [field('Description', 'new')], { dryRun: false, log: noLog });
+  assert.equal(state('Description').value, 'new');
+  assert.equal(state('Description of changes').value, 'keep');
+});
+
+test('inspect lists each control with the accessible name the field map matches', async () => {
+  const snapshot = ['- main:', '  - button "Save draft"', '  - textbox "Description*": Some text', '  - combobox "Category* Developer Tools"', '  - checkbox "Say \\"hi\\""', '  - heading "Store Listing" [level=1]'].join('\n');
+  const controls = await inspectControls({ locator: (selector: string) => { assert.equal(selector, 'body'); return { ariaSnapshot: async () => snapshot }; } } as never);
+  assert.deepEqual(controls, [
+    { role: 'button', name: 'Save draft' },
+    { role: 'textbox', name: 'Description*' },
+    { role: 'combobox', name: 'Category* Developer Tools' },
+    { role: 'checkbox', name: 'Say "hi"' },
+  ]);
+});
+
 test('a missing or ambiguous field stops the run before any field is written', async () => {
   const fields = [field('Description', 'new'), field('Homepage URL', 'https://example.com')];
   const missing = fakeConsolePage([['textbox', 'Description', 'old']]);
   await assert.rejects(syncFields(missing.page, fields, { dryRun: false, log: noLog }), /"Homepage URL" matched 0 controls/);
   assert.equal(missing.state('Description').fills, 0, 'the earlier field must not be written when a later one is missing');
-  const doubled = fakeConsolePage([['textbox', 'Description', 'old'], ['textbox', 'Homepage URL', ''], ['textbox', 'Homepage URL', '']]);
+  const doubled = fakeConsolePage([['textbox', 'Description', 'old'], ['textbox', 'Homepage URL', '', { optional: true }], ['textbox', 'Homepage URL', '', { optional: true }]]);
   await assert.rejects(syncFields(doubled.page, fields, { dryRun: false, log: noLog }), /"Homepage URL" matched 2 controls/);
   assert.equal(doubled.state('Description').fills, 0);
 });
@@ -457,11 +493,12 @@ test('the publisher Chrome starts on its own profile, is reused while it answers
 const pkgFixture = { path: '/tmp/x.zip', commit: 'a'.repeat(40), version: '2.0.1', manifest: fixtureManifest, entries: ['manifest.json'], bytes: Buffer.from('zip'), sha256: 'f'.repeat(64) };
 
 // Fakes that check what they are given: wrong ids, bytes, URLs or tokens fail the test.
-function publishDeps({ consoleDiffs = { '': ['Description'], privacy: [] as string[] }, keepsSaves = true, ...overrides }: Record<string, any> = {}) {
+function publishDeps({ consoleDiffs = { '': ['Description'], privacy: [] as string[] }, keepsSaves = true, staleReadsAfterSave = 0, ...overrides }: Record<string, any> = {}) {
   const calls: string[] = [];
   const lines: string[] = [];
   let currentTab = '';
   const saved = new Set<string>();
+  const readsAfterSave: Record<string, number> = {};
   const status = (version?: string, submitted?: string) => ({ itemId: ITEM, publishedItemRevisionStatus: version ? { distributionChannels: [{ crxVersion: version }] } : undefined, submittedItemRevisionStatus: submitted ? { state: 'PENDING_REVIEW', distributionChannels: [{ crxVersion: submitted }] } : undefined });
   const statuses = [status('2.0.0'), status('2.0.0', '2.0.1')];
   const expectIds = (request: Record<string, unknown>) => {
@@ -491,7 +528,10 @@ function publishDeps({ consoleDiffs = { '': ['Description'], privacy: [] as stri
       assert.ok(fields.length > 0 && fields.every((f) => f.tab === currentTab), 'fields must belong to the open tab');
       calls.push(`sync:${currentTab || 'listing'}:${dryRun ? 'read' : 'write'}`);
       if (consoleDiffs[currentTab] === 'missing') throw new Error('Console field "x" matched 0 controls');
-      if (saved.has(currentTab) && keepsSaves) return [];
+      if (saved.has(currentTab)) {
+        readsAfterSave[currentTab] = (readsAfterSave[currentTab] ?? 0) + 1;
+        if (keepsSaves && readsAfterSave[currentTab] > staleReadsAfterSave) return [];
+      }
       return (consoleDiffs[currentTab] ?? []).map((label: string) => ({ label }));
     },
     saveDraft: async () => { calls.push(`save:${currentTab || 'listing'}`); saved.add(currentTab); },
@@ -536,9 +576,21 @@ test('--listing saves only the tab that differs and reads it back after reloadin
   ]);
 });
 
-test('--listing fails when the reloaded console does not show the saved text', async () => {
-  const { deps } = publishDeps({ keepsSaves: false });
+test('--listing fails when the reloaded console never shows the saved text', async () => {
+  const sleeps: number[] = [];
+  const { deps, calls } = publishDeps({ keepsSaves: false, sleep: async (ms: number) => { sleeps.push(ms); } });
   await assert.rejects(runPublish(parseArgs(['--listing']), deps), /did not keep the saved store listing fields: Description/);
+  assert.equal(calls.filter((call) => call === 'save:listing').length, 1, 'a lost save is reported, not retried');
+  assert.equal(calls.filter((call) => call === 'sync:listing:read').length, 1 + 5, 'one comparison, then five read-backs');
+  assert.deepEqual(sleeps, [2000, 2000, 2000, 2000]);
+});
+
+test('--listing waits for a save the console finishes after the click', async () => {
+  const { deps, calls } = publishDeps({ staleReadsAfterSave: 2 });
+  await runPublish(parseArgs(['--listing']), deps);
+  const afterSave = calls.slice(calls.indexOf('save:listing') + 1);
+  assert.equal(afterSave.filter((call) => call === 'sync:listing:read').length, 3, 'two stale reads, then the saved text');
+  assert.equal(calls.filter((call) => call === 'save:listing').length, 1);
 });
 
 test('a field missing on the second tab stops --listing before the first tab is written', async () => {

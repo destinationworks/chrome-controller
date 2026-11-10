@@ -18,8 +18,8 @@ export function editUrl(listing, tab = '') {
 }
 
 // Every console field the listing file owns, in the order a person would fill them.
-// `label` is the field's accessible name in the console; a label that does not match
-// exactly one control stops the run before anything is written.
+// `label` is the field's visible label; see `labelPattern` for how it is matched. A label
+// that does not match exactly one control stops the run before anything is written.
 export function consoleFieldPlan(listing) {
   return [
     { tab: '', label: 'Description', kind: 'text', value: listing.description },
@@ -132,20 +132,35 @@ export async function closePublisherChrome(browser) {
   await session.send('Browser.close').catch(() => {});
 }
 
+// The console's accessible names add "*" to required fields, and a combobox's name ends with
+// its current value ("Category* Developer Tools"), so match the label, the optional "*" and,
+// for a combobox, anything after a space.
+function escapeLabel(label) {
+  return label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function labelPattern(field) {
+  const label = escapeLabel(field.label);
+  return new RegExp(field.kind === 'select' ? `^${label}\\*?(?: |$)` : `^${label}\\*?$`);
+}
+
 async function controlFor(page, field) {
   const role = field.kind === 'select' ? 'combobox' : 'textbox';
-  const locator = page.getByRole(role, { name: field.label, exact: true });
+  const locator = page.getByRole(role, { name: labelPattern(field) });
   const count = await locator.count();
   if (count !== 1) throw new Error(`Console field "${field.label}" matched ${count} controls; the console layout changed, so nothing was saved`);
   return locator;
 }
 
-// A native <select> reports every option as its text, so read the selected one instead.
+// A native <select> reports every option as its text, so read the selected one. The console's
+// own comboboxes put their label in innerText too ("Category\nDeveloper Tools"), so their value
+// is read from the accessible name instead, after the label and its "*".
 async function readControl(locator, field) {
-  if (field.kind === 'select') {
-    return locator.evaluate((node) => (node.tagName === 'SELECT' ? node.selectedOptions[0]?.textContent ?? '' : node.innerText).trim());
-  }
-  return locator.inputValue();
+  if (field.kind !== 'select') return locator.inputValue();
+  const native = await locator.evaluate((node) => (node.tagName === 'SELECT' ? (node.selectedOptions[0]?.textContent ?? '').trim() : null));
+  if (native !== null) return native;
+  const name = /"((?:[^"\\]|\\.)*)"/.exec(await locator.ariaSnapshot())?.[1]?.replace(/\\(.)/g, '$1') ?? '';
+  return name.replace(new RegExp(`^${escapeLabel(field.label)}\\*? ?`), '').trim();
 }
 
 // Locates every field before touching any, so a changed layout writes nothing; then, unless
@@ -184,17 +199,13 @@ export async function saveDraft(page) {
   await page.waitForLoadState('networkidle').catch(() => {});
 }
 
-// Every labelled form control on the current console page, for mapping a changed layout.
+// Every form control on the current console page with the accessible name the field map
+// matches against, read from the page's ARIA snapshot.
 export async function inspectControls(page) {
+  const snapshot = await page.locator('body').ariaSnapshot();
   const controls = [];
-  for (const role of ['textbox', 'combobox', 'checkbox', 'radio', 'button']) {
-    for (const element of await page.getByRole(role).all()) {
-      const name = await element.evaluate((node) => node.getAttribute('aria-label')
-        ?? node.labels?.[0]?.innerText
-        ?? (node.getAttribute('aria-labelledby') ? document.getElementById(node.getAttribute('aria-labelledby'))?.innerText : null)
-        ?? node.innerText?.slice(0, 60) ?? '');
-      controls.push({ role, name: String(name).trim() });
-    }
+  for (const match of snapshot.matchAll(/- (textbox|combobox|checkbox|radio|button) "((?:[^"\\]|\\.)*)"/g)) {
+    controls.push({ role: match[1], name: match[2].replace(/\\(.)/g, '$1') });
   }
   return controls;
 }

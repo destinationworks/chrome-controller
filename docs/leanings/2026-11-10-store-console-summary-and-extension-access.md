@@ -1,6 +1,6 @@
 # 2026-11-10 — The store console cannot be driven by an extension, and has no summary field
 
-- **Status:** Partial
+- **Status:** Resolved
 - **Task/context:** Automating Chrome Web Store publishing (`scripts/store-publish.js`) so the listing text in `docs/chrome-web-store-listing.md` reaches the console without hand-pasting.
 - **Unexpected observation or failure:** Three earlier agent sessions failed to edit the Developer Console through browser-extension tooling, and the listing summary could not be changed in the console at all.
 - **Evidence:** A Codex session on 2026-10-29 recorded that its browser extension tool refused to drive the console; the 2026-09-20 edit was made with OS-level computer use instead. Two independent transcript searches report the console's summary as "Summary from package", read from the manifest `description`. The Chrome Web Store API V2 offers upload, status, publish, cancel, rollback and rollout percentage only; no listing-text method exists. Confirmed live on 2026-11-10: in the Chrome profile signed in as the publisher, with the console loaded, Chrome Controller's `evaluateOnPage` on `.../devconsole/<publisher>/<item>/edit` failed with "The extensions gallery cannot be scripted."
@@ -12,11 +12,11 @@
     - **Outcome:** Did not work.
     - **Why:** V2 has no listing-text endpoint.
   - **Attempt:** A dedicated Chrome profile driven over the DevTools protocol (playwright-core `connectOverCDP`) for text, API V2 for the package.
-    - **Outcome:** Partial. Implemented and unit-tested; the console field labels are unverified until the first signed-in `--inspect` run.
+    - **Outcome:** Worked, after two live corrections. Google rejects sign-in inside a DevTools-driven browser (`/signin/rejected`), so `--sign-in` opens the profile as plain Chrome once and automated runs reuse the session. The console's accessible names add `*` to required fields and append a combobox's value ("Category* Developer Tools"), so labels are matched by pattern and combobox values read from the accessible name.
     - **Why:** The DevTools protocol is not subject to the extension restriction, and a separate profile keeps the everyday profile untouched.
 - **Root cause:** Chrome's extension restriction on Web Store pages, and the console sourcing the summary from the package.
 - **Resolution:** The manifest `description` now equals the listing summary and validation refuses a mismatch. Text goes through the publisher profile; the package and review go through the API.
-- **Verification:** `src/store-publish.test.ts`; the live "extensions gallery cannot be scripted" refusal above. Still pending: a signed-in `npm run store:publish -- --inspect` to confirm the console labels, then `--diff`.
-- **Prevention/follow-up:** Run `--inspect` after any console redesign; a label that matches zero or several controls stops the run before writing.
+- **Verification:** `src/store-publish.test.ts`; the live refusal above; on 2026-11-10 `--inspect`, `--diff` and `--listing` ran against the live console: `--listing` saved the changed `alarms` justification and a fresh `--diff` reported both tabs matching the listing file. The console finishes saving after the click, so the read-back retries before failing.
+- **Prevention/follow-up:** Run `--inspect` after any console redesign; a label that matches zero or several controls stops the run before writing. The API upload and submit still await credentials and a first live run.
 - **Reusable learning:** Do not plan extension-based automation for Web Store pages. Change the store summary through the manifest, never the console.
 - **References:** `scripts/store-console.js`, `scripts/store-api.js`, `docs/store-publishing.md`, `docs/leanings/2026-10-31-store-listing-text-lived-only-in-the-console.md`.
