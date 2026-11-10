@@ -91,6 +91,7 @@ export async function openConsoleTab(page, url, { log, timeoutMs = 10 * 60_000, 
       log('Google wants you to sign in or verify the account in the publisher Chrome window. Waiting...');
       asked = true;
     }
+    if (page.isClosed()) throw new Error('The publisher Chrome window was closed before Google sign-in finished');
     if (Date.now() > deadline) throw new Error('Timed out waiting for Google sign-in in the publisher Chrome window');
     await sleep(2_000);
   }

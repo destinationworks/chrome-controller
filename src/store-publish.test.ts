@@ -402,7 +402,8 @@ test('saving needs exactly one Save draft button', async () => {
 
 function fakeNavigatingPage(urls: string[]) {
   let index = 0;
-  return { goto: async () => {}, url: () => urls[Math.min(index, urls.length - 1)], waitForLoadState: async () => {}, advance: () => { index += 1; } };
+  let closed = false;
+  return { goto: async () => {}, url: () => urls[Math.min(index, urls.length - 1)], waitForLoadState: async () => {}, isClosed: () => closed, close: () => { closed = true; }, advance: () => { index += 1; } };
 }
 
 test('opening the console waits while Google asks for sign-in, then requires the exact console page', async () => {
@@ -414,6 +415,8 @@ test('opening the console waits while Google asks for sign-in, then requires the
   assert.match(lines[0], /verify the account in the publisher Chrome window/);
 
   await assert.rejects(openConsoleTab(fakeNavigatingPage(['https://accounts.google.com/x']) as never, target, { log: noLog, timeoutMs: -1, sleep: async () => {} }), /Timed out waiting for Google sign-in/);
+  const closing = fakeNavigatingPage(['https://accounts.google.com/x']);
+  await assert.rejects(openConsoleTab(closing as never, target, { log: noLog, sleep: async () => closing.close() }), /window was closed before Google sign-in finished/);
   await assert.rejects(openConsoleTab(fakeNavigatingPage([`${target}/privacy`]) as never, target, { log: noLog, sleep: async () => {} }), /instead of/);
   await assert.rejects(openConsoleTab(fakeNavigatingPage(['https://chrome.google.com/webstore/devconsole']) as never, target, { log: noLog, sleep: async () => {} }), /instead of/);
 });
