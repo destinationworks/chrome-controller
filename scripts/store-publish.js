@@ -28,6 +28,12 @@ const SAVE_CHECKS = 5;
 const SAVE_CHECK_INTERVAL_MS = 2_000;
 const FLAGS = ['--diff', '--listing', '--upload', '--submit', '--inspect', '--sign-in', '--authorize'];
 
+// The credential store and authorization flow main() runs with; `run` replaces the
+// `security` tool in tests.
+export function credentialDeps({ run } = {}) {
+  return { keychain: keychain(run ? { run } : {}), authorize };
+}
+
 export function parseArgs(argv) {
   for (const arg of argv) if (!FLAGS.includes(arg)) throw new Error(`Unknown option ${arg}; expected ${FLAGS.join(', ')}`);
   const options = Object.fromEntries(FLAGS.map((flag) => [flag.slice(2).replace(/-(\w)/g, (_, letter) => letter.toUpperCase()), argv.includes(flag)]));
@@ -173,8 +179,7 @@ async function main() {
   await runPublish(options, {
     log: (line) => console.log(line),
     env: process.env,
-    keychain: keychain(),
-    authorize: (client, options) => authorize(client, options),
+    ...credentialDeps(),
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     readListing: () => fs.readFileSync(path.join(repoRoot, 'docs', 'chrome-web-store-listing.md'), 'utf8'),
     buildPackage: () => buildPackage({ repoRoot, outDir: path.join(repoRoot, 'dist', 'store') }),

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -82,6 +84,46 @@ test('Keychain failures name the account and exit status but never the value', (
   assert.throws(() => absent.read('client_id'), /needs the macOS `security` tool; elsewhere set CWS_CLIENT_ID, CWS_CLIENT_SECRET, CWS_REFRESH_TOKEN/);
 });
 
+test('a spawn failure other than ENOENT names its code instead of blaming a missing tool', () => {
+  const run = () => ({ status: null, error: Object.assign(new Error('spawnSync security EACCES'), { code: 'EACCES' }), stdout: '' });
+  assert.throws(() => keychain({ run }).read('client_id'), (error: Error) => {
+    assert.equal(error.message, 'Reading client_id in the Keychain failed (security exit EACCES)');
+    return true;
+  });
+});
+
+test('a keychain file goes after the value on add and last on find', () => {
+  const security = fakeSecurity();
+  const file = '/tmp/store-test.keychain-db';
+  keychain({ run: security.run, file }).write('refresh_token', REFRESH);
+  assert.deepEqual(security.runs.map((run) => run.input ?? run.args.join(' ')), [
+    `add-generic-password -U -s ${KEYCHAIN_SERVICE} -a refresh_token -w ${REFRESH} ${file}\n`,
+    `find-generic-password -s ${KEYCHAIN_SERVICE} -a refresh_token -w ${file}`,
+  ]);
+});
+
+test('a write that leaves the previous value in place is not reported as stored', () => {
+  const stale = fakeSecurity({ keepsWrites: false });
+  stale.items.set(`${KEYCHAIN_SERVICE}/refresh_token`, 'old-token');
+  assert.throws(() => keychain({ run: stale.run }).write('refresh_token', REFRESH), /The Keychain did not keep refresh_token/);
+});
+
+test('an item that exists with an empty value counts as missing', () => {
+  const empty = keychain({ run: () => ({ status: 0, stdout: '\n' }) });
+  assert.equal(empty.read('client_id'), '');
+  assert.throws(() => apiCredentials({}, empty), /missing from the Keychain service "chrome-controller-store-api": client_id, client_secret, refresh_token\./);
+  assert.throws(() => clientCredentials({}, empty), /OAuth client is missing from the Keychain service "chrome-controller-store-api": client_id, client_secret\./);
+});
+
+test('every character the Keychain command can carry is accepted', () => {
+  const security = fakeSecurity();
+  const store = keychain({ run: security.run });
+  for (const value of ['a.b_c~d/e+f=g-h', '~t', '/s', '+p', '=e', '.d', 'x'.repeat(1024)]) {
+    store.write('refresh_token', value);
+    assert.equal(store.read('refresh_token'), value);
+  }
+});
+
 test('a real keychain stores and returns OAuth-shaped values through the security tool', { skip: process.platform !== 'darwin' && 'needs macOS security' }, () => {
   const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'store-keychain-'));
   const file = path.join(dir, 'test.keychain-db');
@@ -98,9 +140,11 @@ test('a real keychain stores and returns OAuth-shaped values through the securit
     store.write('refresh_token', `${REFRESH}-rotated`);
     assert.equal(store.read('refresh_token'), `${REFRESH}-rotated`, '-U replaces the existing item');
     const login = spawnSync('security', ['find-generic-password', '-s', 'chrome-controller-store-api-test', '-a', 'refresh_token'], { encoding: 'utf8' });
-    assert.notEqual(login.status, 0, 'nothing was written outside the given keychain');
+    assert.equal(login.status, 44, 'nothing was written outside the given keychain');
   } finally {
     spawnSync('security', ['delete-keychain', file]);
+    // If routing to `file` ever breaks, the items land in the login keychain; remove them.
+    for (const account of ['refresh_token', 'client_secret']) spawnSync('security', ['delete-generic-password', '-s', 'chrome-controller-store-api-test', '-a', account]);
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -166,11 +210,15 @@ async function runAuthorize({ browser, token = { refresh_token: REFRESH, scope: 
   return { outcome, lines, exchanges, browserResult: await browsed, redirectUri };
 }
 
+// Only a refused connection proves the server is gone; any other fetch error is a test bug.
 async function closed(uri: string) {
-  return fetch(uri).then(() => false, () => true);
+  assert.match(uri, /^http:\/\/127\.0\.0\.1:\d+$/);
+  return fetch(uri).then(() => false, (error: Error & { cause?: { code?: string } }) => error.cause?.code === 'ECONNREFUSED');
 }
 
-test('authorization runs the PKCE loopback flow and exchanges the code for a refresh token', async () => {
+const LOOPBACK = { timeout: 15_000 };
+
+test('authorization runs the PKCE loopback flow and exchanges the code for a refresh token', LOOPBACK, async () => {
   const { outcome, lines, exchanges, browserResult, redirectUri } = await runAuthorize({
     browser: async ({ uri, state }) => {
       const favicon = await fetch(`${uri}/favicon.ico`);
@@ -206,15 +254,64 @@ test('authorization runs the PKCE loopback flow and exchanges the code for a ref
   assert.ok(await closed(redirectUri), 'the loopback server is closed once the code arrived');
 });
 
-test('each run uses a fresh state and verifier', async () => {
-  const challenges: string[] = [];
+test('each run draws its own state and verifier, independently of each other', LOOPBACK, async () => {
+  const runs: Array<{ state: string; verifier: string }> = [];
   for (let run = 0; run < 2; run += 1) {
-    await runAuthorize({ browser: async ({ uri, state, challenge }) => { challenges.push(`${state}/${challenge}`); return fetch(`${uri}/?state=${state}&code=c`); } });
+    const { exchanges, lines } = await runAuthorize({ browser: async ({ uri, state }) => fetch(`${uri}/?state=${state}&code=c`) });
+    runs.push({ state: new URL(lines[0].split('\n')[1]).searchParams.get('state')!, verifier: exchanges[0].body.get('code_verifier')! });
   }
-  assert.notEqual(challenges[0], challenges[1]);
+  assert.notEqual(runs[0].state, runs[1].state);
+  assert.notEqual(runs[0].verifier, runs[1].verifier);
+  for (const { state, verifier } of runs) assert.ok(!verifier.includes(state), 'the state in the URL reveals nothing of the verifier');
 });
 
-test('an answer with another state, an error or no code fails without exchanging anything', async () => {
+test('a foreign answer is rejected on its state before its error is believed', LOOPBACK, async () => {
+  const { outcome, exchanges } = await runAuthorize({ browser: async ({ uri }) => fetch(`${uri}/?state=forged&error=access_denied`) });
+  assert.match(String((outcome as { error?: Error }).error?.message), /state that does not match this run/);
+  assert.equal(exchanges.length, 0);
+});
+
+test('the loopback server binds 127.0.0.1 only, never all interfaces', LOOPBACK, async (t) => {
+  const hosts: unknown[] = [];
+  const listen = http.Server.prototype.listen;
+  t.mock.method(http.Server.prototype, 'listen', function (this: http.Server, ...args: unknown[]) { hosts.push(args[1]); return listen.apply(this, args as never); });
+  const { outcome } = await runAuthorize({ browser: async ({ uri, state }) => fetch(`${uri}/?state=${state}&code=c`) });
+  assert.deepEqual(outcome, { value: REFRESH });
+  assert.deepEqual(hosts, ['127.0.0.1']);
+});
+
+test('authorization returns promptly even while another connection is half-way through a request', LOOPBACK, async () => {
+  let stray: net.Socket | undefined;
+  const run = runAuthorize({
+    browser: async ({ uri, state }) => {
+      stray = net.connect(Number(new URL(uri).port), '127.0.0.1');
+      await new Promise((resolve) => stray!.once('connect', resolve));
+      stray.write('GET /favicon.ico HTTP/1.1\r\nHost: 127.0.0.1\r\n'); // headers never finished
+      return fetch(`${uri}/?state=${state}&code=c`);
+    },
+  });
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<'late'>((resolve) => { timer = setTimeout(resolve, 3_000, 'late'); });
+  try {
+    const result = await Promise.race([run, late]);
+    assert.notEqual(result, 'late', 'authorize waited on a stray connection before returning');
+    assert.deepEqual((result as Awaited<typeof run>).outcome, { value: REFRESH });
+  } finally {
+    clearTimeout(timer);
+    stray?.destroy();
+    await run;
+  }
+});
+
+test('a successful authorization leaves no timer running', LOOPBACK, async () => {
+  const timers = () => process.getActiveResourcesInfo().filter((resource) => resource === 'Timeout').length;
+  const before = timers();
+  const { outcome } = await runAuthorize({ browser: async ({ uri, state }) => fetch(`${uri}/?state=${state}&code=c`), timeoutMs: 10_000 });
+  assert.deepEqual(outcome, { value: REFRESH });
+  assert.equal(timers(), before);
+});
+
+test('an answer with another state, an error or no code fails without exchanging anything', LOOPBACK, async () => {
   const cases: Array<[string, (state: string) => string, RegExp, string]> = [
     ['foreign state', () => '?state=forged&code=c', /state that does not match this run; nothing was stored/, 'This answer belongs to another authorization run.'],
     ['no state', () => '?code=c', /state that does not match/, 'This answer belongs to another authorization run.'],
@@ -232,13 +329,14 @@ test('an answer with another state, an error or no code fails without exchanging
   }
 });
 
-test('a token answer without a refresh token, without the scope, or with an error fails', async () => {
+test('a token answer without a refresh token, without the scope, or with an error fails', LOOPBACK, async () => {
   const browser = async ({ uri, state }: { uri: string; state: string }) => fetch(`${uri}/?state=${state}&code=c`);
   const cases: Array<[unknown, number, RegExp]> = [
     [{ access_token: 'a', scope: SCOPE }, 200, /Google returned no refresh token; nothing was stored/],
     [{ refresh_token: '', scope: SCOPE }, 200, /no refresh token/],
     [{ refresh_token: REFRESH, scope: 'openid email' }, 200, /without the scope https:\/\/www\.googleapis\.com\/auth\/chromewebstore/],
     [{ refresh_token: REFRESH }, 200, /without the scope/],
+    [{ refresh_token: REFRESH, scope: `${SCOPE}.readonly` }, 200, /without the scope/],
     [{ error: 'invalid_grant', error_description: 'Bad code verifier.' }, 400, /Authorization code exchange failed with HTTP 400: Bad code verifier\./],
   ];
   for (const [token, tokenStatus, expected] of cases) {
@@ -249,7 +347,7 @@ test('a token answer without a refresh token, without the scope, or with an erro
   }
 });
 
-test('authorization gives up after its timeout and closes the loopback server', async () => {
+test('authorization gives up after its timeout and closes the loopback server', LOOPBACK, async () => {
   const { outcome, exchanges, redirectUri } = await runAuthorize({ browser: async () => undefined, timeoutMs: 2_000 });
   assert.match(String((outcome as { error?: Error }).error?.message), /No authorization arrived within 2 seconds; nothing was stored/);
   assert.equal(exchanges.length, 0);

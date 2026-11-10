@@ -14,7 +14,8 @@ import { buildPackage, isNewerVersion, readZip } from '../scripts/store-package.
 import {
   closePublisherChrome, consoleFieldPlan, editUrl, inspectControls, labelPattern, openConsoleTab, openSignInChrome, profileInUse, saveDraft, startPublisherChrome, syncFields,
 } from '../scripts/store-console.js';
-import { parseArgs, runPublish } from '../scripts/store-publish.js';
+import { credentialDeps, parseArgs, runPublish } from '../scripts/store-publish.js';
+import { authorize } from '../scripts/store-oauth.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const realListing = fs.readFileSync(path.join(repoRoot, 'docs', 'chrome-web-store-listing.md'), 'utf8');
@@ -720,24 +721,24 @@ test('--authorize gets a token for the Keychain client, proves it reads the item
   const authorized: unknown[] = [];
   const { deps, calls, lines, keychainWrites } = publishDeps({
     env: {},
-    keychainEntries: { client_id: 'ki', client_secret: 'ks', refresh_token: 'old' },
+    keychainEntries: { client_id: 'ki', client_secret: 'synthetic-keychain-secret', refresh_token: 'old' },
     buildPackage: () => assert.fail('no package for --authorize'),
     authorize: async (client: unknown, options: { log: unknown }) => { authorized.push(client); assert.equal(typeof options.log, 'function'); calls.push('authorize'); return 'new-refresh'; },
-    fetchAccessToken: async (credentials: unknown) => { assert.deepEqual(credentials, { clientId: 'ki', clientSecret: 'ks', refreshToken: 'new-refresh' }); calls.push('token'); return 'token'; },
+    fetchAccessToken: async (credentials: unknown) => { assert.deepEqual(credentials, { clientId: 'ki', clientSecret: 'synthetic-keychain-secret', refreshToken: 'new-refresh' }); calls.push('token'); return 'token'; },
   });
   await runPublish(parseArgs(['--authorize']), deps);
-  assert.deepEqual(authorized, [{ clientId: 'ki', clientSecret: 'ks' }]);
+  assert.deepEqual(authorized, [{ clientId: 'ki', clientSecret: 'synthetic-keychain-secret' }]);
   assert.deepEqual(calls, ['authorize', 'token', 'status', 'keychain:refresh_token'], 'stored only after the status call succeeded');
   assert.deepEqual(keychainWrites, [['refresh_token', 'new-refresh']]);
   const log = lines.join('\n');
   assert.match(log, new RegExp(`Authorized: the token reads item ${ITEM} \\(store serves 2\\.0\\.0\\); refresh token saved to the Keychain service "chrome-controller-store-api"`));
-  assert.ok(!log.includes('new-refresh') && !log.includes('ks'), 'no secret is logged');
+  assert.ok(!log.includes('new-refresh') && !log.includes('synthetic-keychain-secret'), 'no secret is logged');
 });
 
 test('--authorize keeps the stored token when the new one cannot read the item', async () => {
   const { deps, keychainWrites } = publishDeps({
     env: {},
-    keychainEntries: { client_id: 'ki', client_secret: 'ks', refresh_token: 'old' },
+    keychainEntries: { client_id: 'ki', client_secret: 'synthetic-keychain-secret', refresh_token: 'old' },
     authorize: async () => 'other-account-token',
     fetchAccessToken: async () => 'token',
     fetchStatus: async () => { throw new Error('Status fetch failed with HTTP 403: The caller does not have permission'); },
@@ -747,10 +748,35 @@ test('--authorize keeps the stored token when the new one cannot read the item',
 });
 
 test('--authorize stops before opening an authorization when CWS variables are set or the client is missing', async () => {
-  const overridden = publishDeps({ keychainEntries: { client_id: 'ki', client_secret: 'ks' } });
+  const overridden = publishDeps({ keychainEntries: { client_id: 'ki', client_secret: 'synthetic-keychain-secret' } });
   await assert.rejects(runPublish(parseArgs(['--authorize']), overridden.deps), /CWS_CLIENT_ID, CWS_CLIENT_SECRET, CWS_REFRESH_TOKEN would override it on later runs/);
   assert.deepEqual(overridden.calls, []);
   const noClient = publishDeps({ env: {}, keychainEntries: { client_id: 'ki' } });
   await assert.rejects(runPublish(parseArgs(['--authorize']), noClient.deps), /OAuth client is missing from the Keychain service "chrome-controller-store-api": client_secret/);
   assert.deepEqual(noClient.calls, []);
+});
+
+test('--authorize reports nothing as saved when the Keychain write fails', async () => {
+  const { deps, lines } = publishDeps({ env: {}, keychainEntries: { client_id: 'ki', client_secret: 'synthetic-keychain-secret', refresh_token: 'old' }, authorize: async () => 'new-refresh', fetchAccessToken: async () => 'token' });
+  deps.keychain.write = () => { throw new Error('The Keychain did not keep refresh_token'); };
+  await assert.rejects(runPublish(parseArgs(['--authorize']), deps), /did not keep refresh_token/);
+  assert.ok(!lines.some((line) => line.startsWith('Authorized')));
+});
+
+test('--authorize stores nothing when the new refresh token cannot be exchanged', async () => {
+  const { deps, calls, keychainWrites } = publishDeps({
+    env: {}, keychainEntries: { client_id: 'ki', client_secret: 'synthetic-keychain-secret', refresh_token: 'old' }, authorize: async () => 'new-refresh',
+    fetchAccessToken: async () => { throw new Error('Access token refresh failed with HTTP 400: Bad Request'); },
+  });
+  await assert.rejects(runPublish(parseArgs(['--authorize']), deps), /HTTP 400/);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(keychainWrites, []);
+});
+
+test('the CLI reads the login Keychain service and runs the real authorization flow', () => {
+  const runs: string[][] = [];
+  const deps = credentialDeps({ run: (_command: string, args: string[]) => { runs.push(args); return { status: 44, stdout: '' }; } });
+  assert.equal(deps.keychain.read('client_id'), undefined);
+  assert.deepEqual(runs, [['find-generic-password', '-s', 'chrome-controller-store-api', '-a', 'client_id', '-w']]);
+  assert.equal(deps.authorize, authorize);
 });
