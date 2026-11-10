@@ -17,6 +17,10 @@ an MIT license.
 
 ## 1. Summary / Short Description (under 132 characters)
 
+The console has no editable summary: it shows the uploaded package's manifest `description`.
+Keep this text identical to `Chrome Extension/manifest.json` (the publish script refuses a
+mismatch); a new summary reaches the store only with a new package.
+
 ```text
 Local browser control for AI agents (Pi, p and MCP clients) via Native Messaging, in a visible AI Tool tab group.
 ```

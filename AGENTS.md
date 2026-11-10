@@ -76,6 +76,11 @@ While actively working, reread `user-updates.md` for new instructions at least o
 - The worker's protected-tab lock is checked on entry, between sequential batch items, and before any non-sensitive reply (`browserOutputLock` in `Chrome Extension/background.js`). A new code path that acts or answers after an await must re-check it, with the request's entry `outputLockEpoch`.
 - `src/ipc-client.ts` is the only IPC client; the Pi extension and the MCP server both wrap it. Do not add another copy: a transport fix landed in one copy and not the other.
 
+## Chrome Web Store
+
+- Listing text and Privacy practices answers live in `docs/chrome-web-store-listing.md`; publish them and the package with `npm run store:publish` (see `docs/store-publishing.md`). Never type listing text only into the console: it is lost the next time the listing is replaced.
+- The API credentials live in the macOS login Keychain, service `chrome-controller-store-api` (`client_id`, `client_secret`, `refresh_token`). `npm run store:publish -- --authorize` renews the refresh token through a loopback consent flow. Never route the client secret through a web form such as the OAuth Playground, or through a store that forgets it (the secure-clipboard vault is in-memory, at most 24 hours).
+
 ## Issues and PRs
 
 When creating PRs:

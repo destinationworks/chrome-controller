@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "p agent extension",
   "version": "1.3.2",
-  "description": "Local browser control bridge for AI agents via Native Messaging",
+  "description": "Local browser control for AI agents (Pi, p and MCP clients) via Native Messaging, in a visible AI Tool tab group.",
   "author": "dst.works@gmail.com",
   "homepage_url": "https://github.com/dst0/chrome-controller",
   "action": {
