@@ -6,7 +6,7 @@ import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import test, { mock } from 'node:test';
 
 import { apiCredentials, clientCredentials, keychain, KEYCHAIN_SERVICE } from '../scripts/store-credentials.js';
 import { authorize, AUTH_URL, SCOPE } from '../scripts/store-oauth.js';
@@ -205,21 +205,32 @@ async function runAuthorize({ browser, token = { refresh_token: REFRESH, scope: 
     exchanges.push({ url, body: new URLSearchParams(init.body) });
     return new Response(JSON.stringify(token), { status: tokenStatus });
   };
-  const result = authorize(CLIENT, { log, fetchImpl: fetchImpl as unknown as typeof fetch, timeoutMs });
-  const outcome = await result.then((value) => ({ value }), (error: Error) => ({ error }));
-  return { outcome, lines, exchanges, browserResult: await browsed, redirectUri };
+  // The server authorize() starts is captured as it begins listening, so tests check the server
+  // itself. Probing its port is racy: on a shared CI host another process can bind the freed
+  // port at once.
+  const servers: http.Server[] = [];
+  const listen = http.Server.prototype.listen;
+  const spy = mock.method(http.Server.prototype, 'listen', function (this: http.Server, ...args: unknown[]) { servers.push(this); return listen.apply(this, args as never); });
+  let outcome: { value: string } | { error: Error };
+  try {
+    outcome = await authorize(CLIENT, { log, fetchImpl: fetchImpl as unknown as typeof fetch, timeoutMs }).then((value) => ({ value }), (error: Error) => ({ error }));
+  } finally {
+    spy.mock.restore();
+  }
+  assert.equal(servers.length, 1, 'authorize starts exactly one server');
+  return { outcome, lines, exchanges, browserResult: await browsed, redirectUri, server: servers[0] };
 }
 
-// Only a refused connection proves the server is gone; any other fetch error is a test bug.
-async function closed(uri: string) {
-  assert.match(uri, /^http:\/\/127\.0\.0\.1:\d+$/);
-  return fetch(uri).then(() => false, (error: Error & { cause?: { code?: string } }) => error.cause?.code === 'ECONNREFUSED');
+// The loopback server no longer listens and holds no connection.
+async function stopped(server: http.Server) {
+  const connections = await new Promise<number>((resolve, reject) => server.getConnections((error, count) => (error ? reject(error) : resolve(count))));
+  return !server.listening && connections === 0;
 }
 
 const LOOPBACK = { timeout: 15_000 };
 
 test('authorization runs the PKCE loopback flow and exchanges the code for a refresh token', LOOPBACK, async () => {
-  const { outcome, lines, exchanges, browserResult, redirectUri } = await runAuthorize({
+  const { outcome, lines, exchanges, browserResult, redirectUri, server } = await runAuthorize({
     browser: async ({ uri, state }) => {
       const favicon = await fetch(`${uri}/favicon.ico`);
       const answer = await fetch(`${uri}/?state=${state}&code=synthetic-code&scope=${encodeURIComponent(SCOPE)}`);
@@ -251,7 +262,7 @@ test('authorization runs the PKCE loopback flow and exchanges the code for a ref
 
   const logged = lines.join('\n');
   for (const secret of [CLIENT.clientSecret, REFRESH, body.code_verifier]) assert.ok(!logged.includes(secret), 'secrets are never logged');
-  assert.ok(await closed(redirectUri), 'the loopback server is closed once the code arrived');
+  assert.ok(await stopped(server), 'the loopback server is closed once the code arrived');
 });
 
 test('each run draws its own state and verifier, independently of each other', LOOPBACK, async () => {
@@ -319,13 +330,13 @@ test('an answer with another state, an error or no code fails without exchanging
     ['no code', (state) => `?state=${state}`, /without an authorization code; nothing was stored/, 'Google sent no authorization code.'],
   ];
   for (const [name, query, expected, message] of cases) {
-    const { outcome, exchanges, browserResult, redirectUri } = await runAuthorize({
+    const { outcome, exchanges, browserResult, server } = await runAuthorize({
       browser: async ({ uri, state }) => { const answer = await fetch(`${uri}/${query(state)}`); return { status: answer.status, page: await answer.text() }; },
     });
     assert.match(String((outcome as { error?: Error }).error?.message), expected, name);
     assert.deepEqual(browserResult, { status: 400, page: `<!doctype html><meta charset="utf-8"><title>Chrome Web Store API</title><p>${message}</p>` }, name);
     assert.equal(exchanges.length, 0, `${name}: nothing is exchanged`);
-    assert.ok(await closed(redirectUri), `${name}: the server is closed`);
+    assert.ok(await stopped(server), `${name}: the server is closed`);
   }
 });
 
@@ -348,8 +359,8 @@ test('a token answer without a refresh token, without the scope, or with an erro
 });
 
 test('authorization gives up after its timeout and closes the loopback server', LOOPBACK, async () => {
-  const { outcome, exchanges, redirectUri } = await runAuthorize({ browser: async () => undefined, timeoutMs: 2_000 });
+  const { outcome, exchanges, server } = await runAuthorize({ browser: async () => undefined, timeoutMs: 2_000 });
   assert.match(String((outcome as { error?: Error }).error?.message), /No authorization arrived within 2 seconds; nothing was stored/);
   assert.equal(exchanges.length, 0);
-  assert.ok(await closed(redirectUri));
+  assert.ok(await stopped(server));
 });
