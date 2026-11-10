@@ -780,3 +780,12 @@ test('the CLI reads the login Keychain service and runs the real authorization f
   assert.deepEqual(runs, [['find-generic-password', '-s', 'chrome-controller-store-api', '-a', 'client_id', '-w']]);
   assert.equal(deps.authorize, authorize);
 });
+
+test('--authorize on an item with nothing published says so', async () => {
+  const { deps, lines } = publishDeps({
+    env: {}, keychainEntries: { client_id: 'ki', client_secret: 'synthetic-keychain-secret' }, authorize: async () => 'new-refresh', fetchAccessToken: async () => 'token',
+    fetchStatus: async () => ({ itemId: ITEM }),
+  });
+  await runPublish(parseArgs(['--authorize']), deps);
+  assert.match(lines.join('\n'), /\(store serves nothing yet\)/);
+});
