@@ -20,6 +20,20 @@ function itemPath(publisherId, itemId) {
 }
 
 // Google's error body says what was wrong; the request (and its token) is never echoed.
+// fetch rejects with a bare "fetch failed" and keeps the reason (DNS, refused connection, TLS)
+// in its cause. The error names the call, the host and that reason, never the request.
+export async function send(what, url, init, fetchImpl) {
+  try {
+    return await fetchImpl(url, init);
+  } catch (error) {
+    const cause = error?.cause;
+    const reason = cause?.message
+      ? `${cause.message}${cause.code && !cause.message.includes(cause.code) ? ` (${cause.code})` : ''}`
+      : error?.message ?? String(error);
+    throw new Error(`${what} could not reach ${new URL(url).host}: ${reason}`, { cause: error });
+  }
+}
+
 export async function readJson(response, what) {
   const text = await response.text();
   let body;
@@ -33,11 +47,11 @@ export async function readJson(response, what) {
 }
 
 export async function fetchAccessToken({ clientId, clientSecret, refreshToken }, fetchImpl = fetch) {
-  const response = await fetchImpl(TOKEN_URL, {
+  const response = await send('Access token refresh', TOKEN_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' }).toString(),
-  });
+  }, fetchImpl);
   const body = await readJson(response, 'Access token refresh');
   if (typeof body.access_token !== 'string' || body.access_token.length === 0) {
     throw new Error('Access token refresh returned no access_token');
@@ -46,19 +60,19 @@ export async function fetchAccessToken({ clientId, clientSecret, refreshToken },
 }
 
 export async function uploadPackage({ token, publisherId, itemId, zip }, fetchImpl = fetch) {
-  const response = await fetchImpl(`${API_ORIGIN}/upload/v2/${itemPath(publisherId, itemId)}:upload`, {
+  const response = await send('Package upload', `${API_ORIGIN}/upload/v2/${itemPath(publisherId, itemId)}:upload`, {
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/zip' },
     body: zip,
-  });
+  }, fetchImpl);
   return readJson(response, 'Package upload');
 }
 
 export async function fetchStatus({ token, publisherId, itemId }, fetchImpl = fetch) {
-  const response = await fetchImpl(`${API_ORIGIN}/v2/${itemPath(publisherId, itemId)}:fetchStatus`, {
+  const response = await send('Status fetch', `${API_ORIGIN}/v2/${itemPath(publisherId, itemId)}:fetchStatus`, {
     method: 'GET',
     headers: { authorization: `Bearer ${token}` },
-  });
+  }, fetchImpl);
   const status = await readJson(response, 'Status fetch');
   // An empty answer would read as "nothing published" and wave any version through.
   if (status.itemId !== itemId) throw new Error(`Status fetch answered for item ${status.itemId ?? 'none'}, expected ${itemId}`);
@@ -69,14 +83,18 @@ export async function fetchStatus({ token, publisherId, itemId }, fetchImpl = fe
 // fails the run.
 export const SUBMITTED_STATES = new Set(['PENDING_REVIEW', 'STAGED', 'PUBLISHED', 'PUBLISHED_TO_TESTERS']);
 
+// A submission still waiting for review or for publication. While one exists, a new upload or
+// submit would collide with it.
+export const PENDING_STATES = new Set(['PENDING_REVIEW', 'STAGED']);
+
 // Submits the item for review. blockOnWarnings makes Google refuse instead of publishing
 // past a validation warning nobody has read.
 export async function publishItem({ token, publisherId, itemId }, fetchImpl = fetch) {
-  const response = await fetchImpl(`${API_ORIGIN}/v2/${itemPath(publisherId, itemId)}:publish`, {
+  const response = await send('Publish', `${API_ORIGIN}/v2/${itemPath(publisherId, itemId)}:publish`, {
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ publishType: 'DEFAULT_PUBLISH', blockOnWarnings: true }),
-  });
+  }, fetchImpl);
   const result = await readJson(response, 'Publish');
   if (!SUBMITTED_STATES.has(result.state)) throw new Error(`Publish ended in state ${result.state ?? 'unknown'}`);
   return result;

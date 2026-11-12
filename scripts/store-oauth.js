@@ -6,7 +6,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import http from 'node:http';
 
-import { readJson } from './store-api.js';
+import { readJson, send } from './store-api.js';
 
 export const SCOPE = 'https://www.googleapis.com/auth/chromewebstore';
 export const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
@@ -58,11 +58,11 @@ export async function authorize({ clientId, clientSecret }, { log, fetchImpl = f
     })) url.searchParams.set(name, value);
     log(`Open this URL in the browser signed in as the item owner and allow access:\n${url}`);
     const code = await waitForCode(server, state, timeoutMs);
-    const response = await fetchImpl(TOKEN_URL, {
+    const response = await send('Authorization code exchange', TOKEN_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ code, client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri, grant_type: 'authorization_code', code_verifier: verifier }).toString(),
-    });
+    }, fetchImpl);
     const body = await readJson(response, 'Authorization code exchange');
     if (typeof body.refresh_token !== 'string' || body.refresh_token.length === 0) throw new Error('Google returned no refresh token; nothing was stored');
     if (!String(body.scope ?? '').split(' ').includes(SCOPE)) throw new Error(`Google granted access without the scope ${SCOPE}; nothing was stored`);

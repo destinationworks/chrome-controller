@@ -139,6 +139,14 @@ export async function runPublish(options, deps) {
     const before = await deps.fetchStatus(ids);
     const live = api.publishedVersion(before);
     log(`Store serves ${live ?? 'nothing yet'}; submitted revision is ${api.submittedState(before) ?? 'none'}`);
+    // A rerun after a release must not upload or submit over the submission it made.
+    const pendingState = api.submittedState(before);
+    if (api.PENDING_STATES.has(pendingState)) {
+      const pending = api.submittedVersion(before);
+      throw new Error(pending === pkg.version
+        ? `${pkg.version} is already submitted (${pendingState}); nothing to upload or submit`
+        : `${pending ?? 'Another version'} is submitted (${pendingState}); wait for it to finish or cancel it in the Developer Console before uploading ${pkg.version}`);
+    }
     if (options.upload && !isNewerVersion(pkg.version, live)) {
       throw new Error(`Package version ${pkg.version} is not newer than the published ${live}; bump the manifest version first`);
     }
