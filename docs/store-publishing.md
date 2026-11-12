@@ -101,8 +101,9 @@ none. The script never prints the client secret or the refresh token.
 
 Rerunning step 3 is safe. While the submission is pending review or staged, the run stops
 after one status read with "1.3.2 is already submitted (PENDING_REVIEW); nothing to upload or
-submit"; once that version is published, the version check stops it. A network failure names
-the call, the host and the reason (for example `Status fetch could not reach
-chromewebstore.googleapis.com: getaddrinfo ENOTFOUND …`). The run stops before any write,
-except when the connection drops during an upload or submit; rerun the same command after
-checking the store status.
+submit"; once that version is published, the version check stops it, for `--submit` alone too.
+A network failure names the call, the host and the reason (for example `Access token refresh
+could not reach oauth2.googleapis.com: getaddrinfo ENOTFOUND …`) and stops the run. When the
+connection drops while an upload or submit answer is read, the message says Google may have
+applied the request: check the store status before rerunning. An accepted submission is
+logged ("The store accepted the submission: state …") before the confirming status read.

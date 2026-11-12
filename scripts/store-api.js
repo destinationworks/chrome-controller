@@ -19,23 +19,38 @@ function itemPath(publisherId, itemId) {
   return `publishers/${encodeURIComponent(publisherId)}/items/${encodeURIComponent(itemId)}`;
 }
 
-// Google's error body says what was wrong; the request (and its token) is never echoed.
-// fetch rejects with a bare "fetch failed" and keeps the reason (DNS, refused connection, TLS)
-// in its cause. The error names the call, the host and that reason, never the request.
+// The system reason behind a fetch failure. fetch rejects with a bare "fetch failed" and keeps
+// the reason (DNS, refused connection, TLS) in `cause`; when every address of a host fails, the
+// cause is an AggregateError with an empty message and the reasons in `errors`.
+function reasonOf(error) {
+  const cause = error?.cause;
+  if (cause && typeof cause === 'object') {
+    const parts = cause.message ? [cause.message] : [...new Set((cause.errors ?? []).map((inner) => inner?.message).filter(Boolean))];
+    const text = parts.join('; ');
+    if (text) return cause.code && !text.includes(cause.code) ? `${text} (${cause.code})` : text;
+    if (cause.code) return String(cause.code);
+  }
+  return error?.message ?? String(error);
+}
+
+// Sends one API request. A failure names the call, the host and the reason, never the request.
 export async function send(what, url, init, fetchImpl) {
   try {
     return await fetchImpl(url, init);
   } catch (error) {
-    const cause = error?.cause;
-    const reason = cause?.message
-      ? `${cause.message}${cause.code && !cause.message.includes(cause.code) ? ` (${cause.code})` : ''}`
-      : error?.message ?? String(error);
-    throw new Error(`${what} could not reach ${new URL(url).host}: ${reason}`, { cause: error });
+    throw new Error(`${what} could not reach ${new URL(url).host}: ${reasonOf(error)}`, { cause: error });
   }
 }
 
+// Google's error body says what was wrong; the request (and its token) is never echoed. A
+// connection lost while the answer streams in may follow a request Google already applied.
 export async function readJson(response, what) {
-  const text = await response.text();
+  let text;
+  try {
+    text = await response.text();
+  } catch (error) {
+    throw new Error(`${what} lost the connection while reading its answer: ${reasonOf(error)}. Google may have applied the request; check the store status before rerunning`, { cause: error });
+  }
   let body;
   try { body = text ? JSON.parse(text) : {}; } catch { body = undefined; }
   if (!response.ok) {

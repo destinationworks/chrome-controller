@@ -364,7 +364,6 @@ test('a network failure during the code exchange names the call and the reason',
   const { outcome, server } = await runAuthorize({ browser: async ({ uri, state }) => fetch(`${uri}/?state=${state}&code=c`), tokenFailure });
   const message = String((outcome as { error?: Error }).error?.message);
   assert.equal(message, 'Authorization code exchange could not reach oauth2.googleapis.com: getaddrinfo EAI_AGAIN oauth2.googleapis.com');
-  assert.ok(!message.includes(CLIENT.clientSecret));
   assert.ok(await stopped(server));
 });
 

@@ -3,17 +3,20 @@
 - **Status:** Partial
 - **Task/context:** The user reran `npm run store:publish -- --listing --upload --submit`; it printed the package lines and then only "fetch failed".
 - **Unexpected observation or failure:** Neither the failing call (token refresh or status read) nor the reason (DNS, refused connection, TLS, proxy) was visible, so the failure could not be diagnosed afterwards.
-- **Evidence:** Node's fetch (undici) rejects with `TypeError: fetch failed` and keeps the system error in `error.cause` (for example `getaddrinfo ENOTFOUND host`, code `ENOTFOUND`). `main()` printed `error.message` only. The same calls succeeded from the same machine minutes later, and `curl` reached both Google hosts.
+- **Evidence:** Node's fetch (undici) rejects with `TypeError: fetch failed` and keeps the system error in `error.cause` (for example `getaddrinfo ENOTFOUND host`, code `ENOTFOUND`). When every address of a host fails (a dual-stack `localhost`, or a host with several A/AAAA records), the cause is an `AggregateError` whose own message is empty, with code `ECONNREFUSED` and the per-address errors in `errors`. Reading `cause.message` alone therefore still printed "fetch failed": an independent review showed this with real fetch against `localhost`. A connection dropped while the body streams fails later, in `response.text()`, as `terminated` with cause "other side closed" (`UND_ERR_SOCKET`). `main()` printed `error.message` only. The same calls succeeded from the same machine minutes later, and `curl` reached both Google hosts.
 - **Approaches tried:**
   - **Attempt:** Re-run the calls and print `error.cause`.
     - **Outcome:** Partial
     - **Why:** They succeeded, so the original reason is lost.
-  - **Attempt:** Wrap every API request (`send` in `scripts/store-api.js`, also used by the authorization code exchange) so a rejected fetch becomes "<call> could not reach <host>: <cause message> (<code>)", keeping the original as `cause` and never including the request.
+  - **Attempt:** Wrap every API request (`send` in `scripts/store-api.js`, also used by the authorization code exchange) so a rejected fetch becomes "<call> could not reach <host>: <cause message> (<code>)".
+    - **Outcome:** Partial
+    - **Why:** It covered single-address failures but printed "fetch failed" again for an `AggregateError` cause.
+  - **Attempt:** Build the reason from `cause.message`, else the messages in `cause.errors`, else `cause.code`, then `error.message`. Also wrap `response.text()`, saying Google may have applied the request.
     - **Outcome:** Worked
-    - **Why:** The message now names the call, the host and the system reason.
+    - **Why:** Real fetch to `localhost:2` now reports each refused address, and every failure names the call.
 - **Root cause:** Unknown for the 2026-11-12 failure: the reason was discarded. Most likely a passing network or DNS failure, since nothing changed and the next attempt worked.
 - **Resolution:** Network failures in the store scripts now carry the call, host and reason.
-- **Verification:** "a network failure names the call, the host and the reason instead of a bare \"fetch failed\"" (`src/store-publish.test.ts`) and "a network failure during the code exchange names the call and the reason" (`src/store-authorize.test.ts`) failed before the fix and pass after it.
+- **Verification:** These tests failed before the fix and pass after it: in `src/store-publish.test.ts`, "a network failure names the call…", "a connection refused on every address of a host lists each reason…", "real fetch to a port nothing listens on…" and "a connection dropped while the answer is read…"; in `src/store-authorize.test.ts`, "a network failure during the code exchange…".
 - **Prevention/follow-up:** If the failure recurs, the new message will show its reason; record it in a follow-up learning.
-- **Reusable learning:** When reporting a Node fetch rejection, print `error.cause.message` and `error.cause.code`, not just `error.message`.
+- **Reusable learning:** When reporting a Node fetch rejection, print `error.cause.message`, or the messages in `error.cause.errors` when it is an `AggregateError`, plus `error.cause.code`; and treat a failing `response.text()` as a network error too.
 - **References:** `scripts/store-api.js` (`send`), `scripts/store-oauth.js`.
