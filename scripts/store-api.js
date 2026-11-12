@@ -19,9 +19,38 @@ function itemPath(publisherId, itemId) {
   return `publishers/${encodeURIComponent(publisherId)}/items/${encodeURIComponent(itemId)}`;
 }
 
-// Google's error body says what was wrong; the request (and its token) is never echoed.
+// The system reason behind a fetch failure. fetch rejects with a bare "fetch failed" and keeps
+// the reason (DNS, refused connection, TLS) in `cause`; when every address of a host fails, the
+// cause is an AggregateError with an empty message and the reasons in `errors`.
+function reasonOf(error) {
+  const cause = error?.cause;
+  if (cause && typeof cause === 'object') {
+    const parts = cause.message ? [cause.message] : [...new Set((cause.errors ?? []).map((inner) => inner?.message).filter(Boolean))];
+    const text = parts.join('; ');
+    if (text) return cause.code && !text.includes(cause.code) ? `${text} (${cause.code})` : text;
+    if (cause.code) return String(cause.code);
+  }
+  return error?.message ?? String(error);
+}
+
+// Sends one API request. A failure names the call, the host and the reason, never the request.
+export async function send(what, url, init, fetchImpl) {
+  try {
+    return await fetchImpl(url, init);
+  } catch (error) {
+    throw new Error(`${what} could not reach ${new URL(url).host}: ${reasonOf(error)}`, { cause: error });
+  }
+}
+
+// Google's error body says what was wrong; the request (and its token) is never echoed. A
+// connection lost while the answer streams in may follow a request Google already applied.
 export async function readJson(response, what) {
-  const text = await response.text();
+  let text;
+  try {
+    text = await response.text();
+  } catch (error) {
+    throw new Error(`${what} lost the connection while reading its answer: ${reasonOf(error)}. Google may have applied the request; check the store status before rerunning`, { cause: error });
+  }
   let body;
   try { body = text ? JSON.parse(text) : {}; } catch { body = undefined; }
   if (!response.ok) {
@@ -33,11 +62,11 @@ export async function readJson(response, what) {
 }
 
 export async function fetchAccessToken({ clientId, clientSecret, refreshToken }, fetchImpl = fetch) {
-  const response = await fetchImpl(TOKEN_URL, {
+  const response = await send('Access token refresh', TOKEN_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' }).toString(),
-  });
+  }, fetchImpl);
   const body = await readJson(response, 'Access token refresh');
   if (typeof body.access_token !== 'string' || body.access_token.length === 0) {
     throw new Error('Access token refresh returned no access_token');
@@ -46,19 +75,19 @@ export async function fetchAccessToken({ clientId, clientSecret, refreshToken },
 }
 
 export async function uploadPackage({ token, publisherId, itemId, zip }, fetchImpl = fetch) {
-  const response = await fetchImpl(`${API_ORIGIN}/upload/v2/${itemPath(publisherId, itemId)}:upload`, {
+  const response = await send('Package upload', `${API_ORIGIN}/upload/v2/${itemPath(publisherId, itemId)}:upload`, {
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/zip' },
     body: zip,
-  });
+  }, fetchImpl);
   return readJson(response, 'Package upload');
 }
 
 export async function fetchStatus({ token, publisherId, itemId }, fetchImpl = fetch) {
-  const response = await fetchImpl(`${API_ORIGIN}/v2/${itemPath(publisherId, itemId)}:fetchStatus`, {
+  const response = await send('Status fetch', `${API_ORIGIN}/v2/${itemPath(publisherId, itemId)}:fetchStatus`, {
     method: 'GET',
     headers: { authorization: `Bearer ${token}` },
-  });
+  }, fetchImpl);
   const status = await readJson(response, 'Status fetch');
   // An empty answer would read as "nothing published" and wave any version through.
   if (status.itemId !== itemId) throw new Error(`Status fetch answered for item ${status.itemId ?? 'none'}, expected ${itemId}`);
@@ -69,14 +98,18 @@ export async function fetchStatus({ token, publisherId, itemId }, fetchImpl = fe
 // fails the run.
 export const SUBMITTED_STATES = new Set(['PENDING_REVIEW', 'STAGED', 'PUBLISHED', 'PUBLISHED_TO_TESTERS']);
 
+// A submission still waiting for review or for publication. While one exists, a new upload or
+// submit would collide with it.
+export const PENDING_STATES = new Set(['PENDING_REVIEW', 'STAGED']);
+
 // Submits the item for review. blockOnWarnings makes Google refuse instead of publishing
 // past a validation warning nobody has read.
 export async function publishItem({ token, publisherId, itemId }, fetchImpl = fetch) {
-  const response = await fetchImpl(`${API_ORIGIN}/v2/${itemPath(publisherId, itemId)}:publish`, {
+  const response = await send('Publish', `${API_ORIGIN}/v2/${itemPath(publisherId, itemId)}:publish`, {
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ publishType: 'DEFAULT_PUBLISH', blockOnWarnings: true }),
-  });
+  }, fetchImpl);
   const result = await readJson(response, 'Publish');
   if (!SUBMITTED_STATES.has(result.state)) throw new Error(`Publish ended in state ${result.state ?? 'unknown'}`);
   return result;

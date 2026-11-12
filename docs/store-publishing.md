@@ -9,8 +9,8 @@ package is built from the committed `Chrome Extension/` folder.
 | Check | none | Validates the listing against the manifest and builds the package. No browser, no network; safe for CI. |
 | Compare | `--diff` | Also opens the console and lists the text fields that differ from the listing file. Writes nothing. |
 | Listing text | `--listing` | Fills the console's Store listing and Privacy practices text fields, saves each changed tab as a draft, reloads it and checks the saved text. |
-| Package | `--upload` | Uploads the ZIP through the Chrome Web Store API V2. Refuses a version that is not newer than the published one. |
-| Review | `--submit` | Submits the item for review through the API (`blockOnWarnings`), then fails unless the store reports a submitted state and the package version. |
+| Package | `--upload` | Uploads the ZIP through the Chrome Web Store API V2. Refuses a version that is not newer than the published one, and any upload while a submission is pending review or staged. |
+| Review | `--submit` | Submits the item for review through the API (`blockOnWarnings`), then fails unless the store reports a submitted state and the package version. Refuses while a submission is pending review or staged. |
 | Layout | `--inspect` | Lists the console's form controls, for fixing the field map after Google changes the console. Runs alone. |
 | Sign-in | `--sign-in` | Opens the publisher profile as plain Chrome for the one-time Google sign-in. Runs alone. |
 | API access | `--authorize` | Runs Google's consent flow for the API, checks the new token can read the item, and saves its refresh token in the Keychain. Runs alone. |
@@ -98,3 +98,12 @@ none. The script never prints the client secret or the refresh token.
 3. `npm run store:publish -- --listing --upload --submit`.
 4. Review and public availability follow later; the final status line shows the submitted
    state, not publication.
+
+Rerunning step 3 is safe. While the submission is pending review or staged, the run stops
+after one status read with "1.3.2 is already submitted (PENDING_REVIEW); nothing to upload or
+submit"; once that version is published, the version check stops it, for `--submit` alone too.
+A network failure names the call, the host and the reason (for example `Access token refresh
+could not reach oauth2.googleapis.com: getaddrinfo ENOTFOUND …`) and stops the run. When the
+connection drops while an upload or submit answer is read, the message says Google may have
+applied the request: check the store status before rerunning. An accepted submission is
+logged ("The store accepted the submission: state …") before the confirming status read.
