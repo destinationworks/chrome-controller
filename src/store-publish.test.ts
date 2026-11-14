@@ -193,6 +193,74 @@ test('API answers that are errors, unreadable or about another item fail', async
   }
 });
 
+// What Node's fetch throws when the network fails: a bare "fetch failed" whose cause holds the reason.
+function networkFailure(reason?: string, code?: string) {
+  return (async () => { throw Object.assign(new TypeError('fetch failed'), reason ? { cause: Object.assign(new Error(reason), { code }) } : {}); }) as unknown as typeof fetch;
+}
+
+test('a network failure names the call, the host and the reason instead of a bare "fetch failed"', async () => {
+  const credentials = { clientId: 'cid', clientSecret: 'synthetic-secret', refreshToken: 'synthetic-refresh' };
+  await assert.rejects(fetchAccessToken(credentials, networkFailure('getaddrinfo ENOTFOUND oauth2.googleapis.com', 'ENOTFOUND')), (error: Error) => {
+    assert.equal(error.message, 'Access token refresh could not reach oauth2.googleapis.com: getaddrinfo ENOTFOUND oauth2.googleapis.com');
+    assert.equal((error.cause as Error).message, 'fetch failed', 'the original error stays attached');
+    return true;
+  });
+  const refused = networkFailure('connect ECONNREFUSED 142.250.70.10:443', 'ECONNREFUSED');
+  await assert.rejects(fetchStatus({ token: 't', ...ids }, refused), (error: Error) => error.message === 'Status fetch could not reach chromewebstore.googleapis.com: connect ECONNREFUSED 142.250.70.10:443');
+  await assert.rejects(uploadPackage({ token: 't', ...ids, zip: Buffer.alloc(1) }, refused), (error: Error) => error.message === 'Package upload could not reach chromewebstore.googleapis.com: connect ECONNREFUSED 142.250.70.10:443');
+  await assert.rejects(publishItem({ token: 't', ...ids }, refused), (error: Error) => error.message === 'Publish could not reach chromewebstore.googleapis.com: connect ECONNREFUSED 142.250.70.10:443');
+  // A cause whose text omits its code still shows the code; a failure with no cause still names the call.
+  await assert.rejects(fetchStatus({ token: 't', ...ids }, networkFailure('Client network socket disconnected before secure TLS connection was established', 'ECONNRESET')),
+    (error: Error) => error.message === 'Status fetch could not reach chromewebstore.googleapis.com: Client network socket disconnected before secure TLS connection was established (ECONNRESET)');
+  await assert.rejects(fetchStatus({ token: 't', ...ids }, networkFailure()), (error: Error) => error.message === 'Status fetch could not reach chromewebstore.googleapis.com: fetch failed');
+  await assert.rejects(fetchStatus({ token: 't', ...ids }, networkFailure('unknown scheme')), (error: Error) => error.message === 'Status fetch could not reach chromewebstore.googleapis.com: unknown scheme');
+});
+
+test('a connection refused on every address of a host lists each reason, not "fetch failed"', async () => {
+  // Node tries each address of a host; when all fail, the cause is an AggregateError whose own message is empty.
+  const refusedEverywhere = (async () => {
+    const errors = ['::1', '127.0.0.1'].map((address) => Object.assign(new Error(`connect ECONNREFUSED ${address}:443`), { code: 'ECONNREFUSED' }));
+    throw Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new AggregateError(errors, ''), { code: 'ECONNREFUSED' }) });
+  }) as unknown as typeof fetch;
+  await assert.rejects(fetchStatus({ token: 't', ...ids }, refusedEverywhere),
+    (error: Error) => error.message === 'Status fetch could not reach chromewebstore.googleapis.com: connect ECONNREFUSED ::1:443; connect ECONNREFUSED 127.0.0.1:443');
+  const codeOnly = (async () => { throw Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new AggregateError([], ''), { code: 'ETIMEDOUT' }) }); }) as unknown as typeof fetch;
+  await assert.rejects(fetchStatus({ token: 't', ...ids }, codeOnly), (error: Error) => error.message === 'Status fetch could not reach chromewebstore.googleapis.com: ETIMEDOUT');
+});
+
+test('real fetch to a port nothing listens on reports the refusal through the store client', async () => {
+  // Port 2 is privileged, unassigned in practice and not on fetch's blocked-port list. "localhost"
+  // resolves to one or two addresses depending on the host, so both cause shapes are exercised.
+  const { send } = await import('../scripts/store-api.js');
+  await assert.rejects(send('Status fetch', 'http://localhost:2/', { method: 'GET' }, fetch), (error: Error) => {
+    assert.match(error.message, /^Status fetch could not reach localhost:2: .*ECONNREFUSED/);
+    assert.doesNotMatch(error.message, /fetch failed$/);
+    return true;
+  });
+});
+
+test('rejections that carry no cause are still named: a non-Error value and an abort', async () => {
+  const rejecting = (async () => { throw 'socket hang up'; }) as unknown as typeof fetch;
+  await assert.rejects(fetchStatus({ token: 't', ...ids }, rejecting),
+    (error: Error) => error.message === 'Status fetch could not reach chromewebstore.googleapis.com: socket hang up' && error.cause === 'socket hang up');
+  const aborted = (async () => { throw new DOMException('This operation was aborted', 'AbortError'); }) as unknown as typeof fetch;
+  await assert.rejects(fetchStatus({ token: 't', ...ids }, aborted),
+    (error: Error) => error.message === 'Status fetch could not reach chromewebstore.googleapis.com: This operation was aborted');
+});
+
+test('a connection dropped while the answer is read says the request may already be applied', async () => {
+  const dropped = (async () => ({
+    ok: true,
+    status: 200,
+    text: async () => { throw Object.assign(new TypeError('terminated'), { cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }) }); },
+  })) as unknown as typeof fetch;
+  await assert.rejects(publishItem({ token: 't', ...ids }, dropped), (error: Error) => {
+    assert.equal(error.message, 'Publish lost the connection while reading its answer: other side closed (UND_ERR_SOCKET). Google may have applied the request; check the store status before rerunning');
+    assert.equal((error.cause as Error).message, 'terminated');
+    return true;
+  });
+});
+
 test('an upload still processing is polled until it succeeds, fails or runs out of checks', async () => {
   const sleeps: number[] = [];
   const sleep = async (ms: number) => { sleeps.push(ms); };
@@ -788,4 +856,98 @@ test('--authorize on an item with nothing published says so', async () => {
   });
   await runPublish(parseArgs(['--authorize']), deps);
   assert.match(lines.join('\n'), /\(store serves nothing yet\)/);
+});
+
+// The store's answer for an item whose submission is in `state`.
+function submittedStatus(state: string, version: string) {
+  return { itemId: ITEM, publishedItemRevisionStatus: { distributionChannels: [{ crxVersion: '2.0.0' }] }, submittedItemRevisionStatus: { state, distributionChannels: [{ crxVersion: version }] } };
+}
+
+test('a rerun after the release refuses to upload or submit the version already under review', async () => {
+  for (const flags of [['--upload', '--submit'], ['--upload'], ['--submit'], ['--listing', '--upload', '--submit']]) {
+    const reads: string[] = [];
+    const { deps, calls } = publishDeps({ fetchStatus: async () => { reads.push('status'); return submittedStatus('PENDING_REVIEW', '2.0.1'); } });
+    await assert.rejects(runPublish(parseArgs(flags), deps), /^Error: 2\.0\.1 is already submitted \(PENDING_REVIEW\); nothing to upload or submit$/, flags.join(' '));
+    assert.deepEqual(calls, ['token'], `${flags.join(' ')}: nothing is written, the console included`);
+    assert.deepEqual(reads, ['status'], 'one status read decides');
+  }
+});
+
+test('another version waiting for review or publication blocks a new upload until it is resolved', async () => {
+  for (const state of ['PENDING_REVIEW', 'STAGED']) {
+    const { deps, calls } = publishDeps({ fetchStatus: async () => submittedStatus(state, '2.0.0.5') });
+    await assert.rejects(runPublish(parseArgs(['--upload', '--submit']), deps),
+      new RegExp(`2\\.0\\.0\\.5 is submitted \\(${state}\\); wait for it to finish or cancel it in the Developer Console before uploading 2\\.0\\.1`));
+    assert.deepEqual(calls, ['token']);
+  }
+});
+
+test('a rejected or cancelled submission does not block a new upload', async () => {
+  for (const state of ['REJECTED', 'CANCELLED']) {
+    let statusCalls = 0;
+    const { deps, calls, lines } = publishDeps({
+      fetchStatus: async () => { statusCalls += 1; return statusCalls === 1 ? submittedStatus(state, '2.0.0.5') : submittedStatus('PENDING_REVIEW', '2.0.1'); },
+    });
+    await runPublish(parseArgs(['--upload', '--submit']), deps);
+    assert.deepEqual(calls, ['token', 'upload', 'publish'], state);
+    assert.match(lines.join('\n'), /Submitted 2\.0\.1 for review/);
+  }
+});
+
+test('the same version staged for publication is already submitted', async () => {
+  const { deps, calls } = publishDeps({ fetchStatus: async () => submittedStatus('STAGED', '2.0.1') });
+  await assert.rejects(runPublish(parseArgs(['--upload', '--submit']), deps), /^Error: 2\.0\.1 is already submitted \(STAGED\); nothing to upload or submit$/);
+  assert.deepEqual(calls, ['token']);
+});
+
+test('a pending submission without a version is named as another version', async () => {
+  const { deps, calls } = publishDeps({ fetchStatus: async () => ({ itemId: ITEM, publishedItemRevisionStatus: { distributionChannels: [{ crxVersion: '2.0.0' }] }, submittedItemRevisionStatus: { state: 'PENDING_REVIEW' } }) });
+  await assert.rejects(runPublish(parseArgs(['--upload', '--submit']), deps),
+    /^Error: Another version is submitted \(PENDING_REVIEW\); wait for it to finish or cancel it in the Developer Console before uploading 2\.0\.1$/);
+  assert.deepEqual(calls, ['token']);
+});
+
+test('a submission already published, to everyone or to testers, does not block a newer upload', async () => {
+  for (const state of ['PUBLISHED', 'PUBLISHED_TO_TESTERS']) {
+    let statusCalls = 0;
+    const { deps, calls } = publishDeps({
+      fetchStatus: async () => { statusCalls += 1; return statusCalls === 1 ? submittedStatus(state, '2.0.0') : submittedStatus('PENDING_REVIEW', '2.0.1'); },
+    });
+    await runPublish(parseArgs(['--upload', '--submit']), deps);
+    assert.deepEqual(calls, ['token', 'upload', 'publish'], state);
+  }
+});
+
+test('--submit alone refuses a package version that is already published', async () => {
+  const { deps, calls } = publishDeps({ fetchStatus: async () => ({ itemId: ITEM, publishedItemRevisionStatus: { distributionChannels: [{ crxVersion: '2.0.1' }] } }) });
+  await assert.rejects(runPublish(parseArgs(['--submit']), deps), /^Error: Package version 2\.0\.1 is not newer than the published 2\.0\.1; nothing to submit$/);
+  assert.deepEqual(calls, ['token']);
+});
+
+test('an accepted submission is logged before the confirming status read, which may fail', async () => {
+  let statusCalls = 0;
+  const { deps, calls, lines } = publishDeps({
+    fetchStatus: async () => {
+      statusCalls += 1;
+      if (statusCalls === 1) return { itemId: ITEM, publishedItemRevisionStatus: { distributionChannels: [{ crxVersion: '2.0.0' }] } };
+      throw new Error('Status fetch could not reach chromewebstore.googleapis.com: getaddrinfo EAI_AGAIN chromewebstore.googleapis.com');
+    },
+  });
+  await assert.rejects(runPublish(parseArgs(['--submit']), deps), /Status fetch could not reach/);
+  assert.deepEqual(calls, ['token', 'publish']);
+  assert.ok(lines.includes('The store accepted the submission: state PENDING_REVIEW'), lines.join('\n'));
+});
+
+test('a network failure while the upload is processing stops the run before it submits', async () => {
+  let statusCalls = 0;
+  const { deps, calls } = publishDeps({
+    uploadPackage: async () => { calls.push('upload'); return { uploadState: 'IN_PROGRESS' }; },
+    fetchStatus: async () => {
+      statusCalls += 1;
+      if (statusCalls === 1) return { itemId: ITEM, publishedItemRevisionStatus: { distributionChannels: [{ crxVersion: '2.0.0' }] } };
+      throw new Error('Status fetch could not reach chromewebstore.googleapis.com: connect ECONNRESET');
+    },
+  });
+  await assert.rejects(runPublish(parseArgs(['--upload', '--submit']), deps), /connect ECONNRESET/);
+  assert.deepEqual(calls, ['token', 'upload']);
 });

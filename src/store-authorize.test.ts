@@ -186,9 +186,9 @@ test('--authorize takes only the client from the Keychain and refuses CWS variab
 });
 
 // Runs authorize() against its real loopback server; `browser` plays the redirect Google would send.
-async function runAuthorize({ browser, token = { refresh_token: REFRESH, scope: SCOPE } as unknown, tokenStatus = 200, timeoutMs = 5_000 }: {
+async function runAuthorize({ browser, token = { refresh_token: REFRESH, scope: SCOPE } as unknown, tokenStatus = 200, timeoutMs = 5_000, tokenFailure }: {
   browser: (redirect: { uri: string; state: string; challenge: string; url: URL }) => Promise<unknown>;
-  token?: unknown; tokenStatus?: number; timeoutMs?: number;
+  token?: unknown; tokenStatus?: number; timeoutMs?: number; tokenFailure?: Error;
 }) {
   const lines: string[] = [];
   const exchanges: Array<{ url: string; body: URLSearchParams }> = [];
@@ -203,6 +203,7 @@ async function runAuthorize({ browser, token = { refresh_token: REFRESH, scope: 
   const fetchImpl = async (url: string, init: { method: string; body: string }) => {
     assert.equal(init.method, 'POST');
     exchanges.push({ url, body: new URLSearchParams(init.body) });
+    if (tokenFailure) throw tokenFailure;
     return new Response(JSON.stringify(token), { status: tokenStatus });
   };
   // The server authorize() starts is captured as it begins listening, so tests check the server
@@ -356,6 +357,14 @@ test('a token answer without a refresh token, without the scope, or with an erro
     assert.match(message, expected);
     assert.ok(!message.includes(CLIENT.clientSecret) && !message.includes(REFRESH));
   }
+});
+
+test('a network failure during the code exchange names the call and the reason', LOOPBACK, async () => {
+  const tokenFailure = Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('getaddrinfo EAI_AGAIN oauth2.googleapis.com'), { code: 'EAI_AGAIN' }) });
+  const { outcome, server } = await runAuthorize({ browser: async ({ uri, state }) => fetch(`${uri}/?state=${state}&code=c`), tokenFailure });
+  const message = String((outcome as { error?: Error }).error?.message);
+  assert.equal(message, 'Authorization code exchange could not reach oauth2.googleapis.com: getaddrinfo EAI_AGAIN oauth2.googleapis.com');
+  assert.ok(await stopped(server));
 });
 
 test('authorization gives up after its timeout and closes the loopback server', LOOPBACK, async () => {
