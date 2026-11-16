@@ -87,6 +87,7 @@ function workMs(action: string, params: Params, bound: 'worst' | 'least'): numbe
   if (action === 'captureVideo') {
     const fps = Number(params.fps) || 5;
     const duration = Number(params.duration) || 3;
+    if (!(fps > 0) || !(duration > 0)) return 0;
     const frames = Math.round(duration * fps);
     if (!(frames > 0)) return 0;
     // An endless frame count loops forever in the extension.
@@ -106,7 +107,8 @@ function workMs(action: string, params: Params, bound: 'worst' | 'least'): numbe
     const keystrokes = Array.from(String(command.text || '')).length;
     const delayMs = work(clamp(Number(command.typingDelayMs || 65), 12, 240));
     if (!worst) return keystrokes * delayMs;
-    const jitterMs = work(clamp(Number(command.typingJitterMs || 24), 0, 80));
+    const rawJitter = command.typingJitterMs === 0 ? 0 : (command.typingJitterMs || 24);
+    const jitterMs = work(clamp(Number(rawJitter), 0, 80));
     // Upper bound: full jitter on every key, and every key a pause key.
     const perKeyMs = delayMs + jitterMs + Math.round(delayMs * 0.65) + KEYSTROKE_ALLOWANCE_MS;
     return keystrokes * perKeyMs;

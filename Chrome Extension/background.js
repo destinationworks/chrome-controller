@@ -523,10 +523,14 @@ async function releaseControlledTab(tabId, reason = 'released') {
 }
 
 async function cleanupManagedTabs(options = {}) {
-  const groups = await chrome.tabGroups.query({ title: CONTROLLED_GROUP_TITLE });
+  if (options.windowId !== undefined && (!Number.isSafeInteger(options.windowId) || options.windowId < 0)) {
+    throw new Error(`Invalid windowId: ${options.windowId}`);
+  }
+  const windowFilter = options.windowId !== undefined ? { windowId: options.windowId } : {};
+  const groups = await chrome.tabGroups.query({ title: CONTROLLED_GROUP_TITLE, ...windowFilter });
   const groupIds = groups.map((group) => group.id);
   const tabs = groupIds.length > 0
-    ? await chrome.tabs.query({})
+    ? await chrome.tabs.query(windowFilter)
     : [];
   const managedTabs = tabs.filter((tab) => groupIds.includes(tab.groupId));
   const tabIds = managedTabs.map((tab) => tab.id).filter((tabId) => typeof tabId === 'number');
@@ -626,7 +630,8 @@ function sleep(ms) {
 async function sendAnimatedInsertText(tabId, commandParams = {}) {
   const text = String(commandParams.text || '');
   const delayMs = Math.max(12, Math.min(Number(commandParams.typingDelayMs || 65), 240));
-  const jitterMs = Math.max(0, Math.min(Number(commandParams.typingJitterMs || 24), 80));
+  const rawJitter = commandParams.typingJitterMs === 0 ? 0 : (commandParams.typingJitterMs || 24);
+  const jitterMs = Math.max(0, Math.min(Number(rawJitter), 80));
   let lastResult = {};
 
   for (const char of Array.from(text)) {
@@ -914,7 +919,7 @@ async function executeAction(action, params = {}) {
     const format = params.format || 'jpeg';
     const quality = Number(params.quality) || 80;
     const intervalMs = Math.round(1000 / fps);
-    const totalFrames = Math.round(duration * fps);
+    const totalFrames = fps > 0 && duration > 0 ? Math.round(duration * fps) : 0;
     const frames = [];
 
     for (let i = 0; i < totalFrames; i++) {

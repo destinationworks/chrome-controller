@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import { assertValidIpcTimeout, describeIpcFailure, IpcError, sendIpcRequest, type IpcResponse } from './ipc-client.js';
 import { getSocketPath } from './native-host.js';
 import { HEALTH_CHROME_WAIT_MS, ipcClientTimeoutMs, withChromeWait } from './chrome-wait.js';
+import { buildExtractContentExpression, buildExtractRegionsExpression, isNativeOnlyRequest } from './tool-helpers.js';
 import {
   normalizeInstanceName,
   readDiscovery,
@@ -99,6 +100,11 @@ function relayAllowed(): boolean {
   return process.env.CHROME_CONTROLLER_ALLOW_RELAY === '1' || Boolean(process.env.HTTP_PORT);
 }
 
+function isNativeOnly(payload: Record<string, unknown>): boolean {
+  const action = typeof payload.action === 'string' ? payload.action : '';
+  return isNativeOnlyRequest(action, payload);
+}
+
 const RELAY_HINT = 'set CHROME_CONTROLLER_ALLOW_RELAY=1 or CHROME_CONTROLLER_URL';
 
 /**
@@ -112,7 +118,8 @@ async function tryIpc(
   ipcTimeoutMs: number | undefined,
   signal: AbortSignal | undefined,
 ): Promise<IpcResponse | undefined> {
-  if (process.env.CHROME_CONTROLLER_URL) return undefined;
+  const nativeOnly = isNativeOnly(payload);
+  if (process.env.CHROME_CONTROLLER_URL && !nativeOnly) return undefined;
   const socketPath = getSocketPath();
   try {
     return await sendIpcRequest(socketPath, payload, ipcWaitMs(payload, ipcTimeoutMs), signal);
@@ -120,6 +127,13 @@ async function tryIpc(
     // An abort is the caller's decision, not a transport failure.
     if (!(ipcErr instanceof IpcError)) throw ipcErr;
     const error = ipcErr;
+    if (error.kind === 'unavailable' && nativeOnly) {
+      throw new IpcError(
+        'unavailable',
+        `NATIVE_IPC_UNAVAILABLE: Native Messaging IPC at ${socketPath} is unavailable (${error.message}). ` +
+        'This action carries sensitive data and is never sent over the relay.',
+      );
+    }
     if (error.kind !== 'unavailable' || !relayAllowed()) {
       throw describeIpcFailure(error, socketPath, RELAY_HINT);
     }
@@ -329,9 +343,19 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI, options: C
     ],
     parameters: Type.Object({
       closeTabs: Type.Optional(Type.Boolean({ description: 'When true, close all tabs in the AI Tool group. Defaults to false.' })),
+      windowId: Type.Optional(Type.Number({ description: 'Target window id.' })),
     }),
     async execute(_toolCallId, params, signal) {
-      return textResult(await request({ action: 'cleanupManagedTabs', closeTabs: params.closeTabs === true }, signal));
+      return textResult(
+        await request(
+          {
+            action: 'cleanupManagedTabs',
+            closeTabs: params.closeTabs === true,
+            ...(params.windowId !== undefined ? { windowId: params.windowId } : {}),
+          },
+          signal
+        )
+      );
     },
   });
 
@@ -670,78 +694,7 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI, options: C
         {
           action: 'evaluateOnPage',
           tabId: params.tabId,
-          expression: `(() => {
-          const maxDepth = ${params.maxDepth ?? 3};
-          const maxLength = ${params.untruncated ? 1000000 : (params.maxLength ?? 15000)};
-          const includeLinks = ${params.includeLinks !== false};
-          const includeTables = ${params.includeTables !== false};
-
-          const result = { headings: [], sections: [], links: [], tables: [] };
-          let totalLen = 0;
-
-          document.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(h => {
-            const level = parseInt(h.tagName[1]);
-            if (level <= maxDepth && h.offsetParent) {
-              result.headings.push({ level, text: h.innerText.trim().substring(0, 200) });
-              totalLen += h.innerText.length;
-            }
-          });
-
-          const textBlocks = [];
-          const blockSelectors = 'p, li, blockquote, dt, dd, figcaption, td, th, .content, .text, .description';
-          document.querySelectorAll(blockSelectors).forEach(el => {
-            if (el.offsetParent && !el.closest('script, style, noscript, .chrome-controller-overlay-root')) {
-              const text = el.innerText.trim();
-              if (text.length > 10) textBlocks.push(text);
-            }
-          });
-
-          const seen = new Set();
-          textBlocks.forEach(text => {
-            const key = text.substring(0, 50);
-            if (!seen.has(key) && text.length <= 500) {
-              seen.add(key);
-              result.sections.push(text.substring(0, 500));
-              totalLen += text.length;
-            }
-          });
-
-          if (includeLinks) {
-            document.querySelectorAll('a[href]').forEach(a => {
-              if (a.offsetParent && a.innerText.trim()) {
-                const text = a.innerText.trim().substring(0, 150);
-                const href = a.getAttribute('href') || '';
-                if (!seen.has('l:' + href.substring(0, 30))) {
-                  seen.add('l:' + href.substring(0, 30));
-                  result.links.push({ text, href });
-                  totalLen += text.length + href.length;
-                }
-              }
-            });
-          }
-
-          if (includeTables) {
-            document.querySelectorAll('table').forEach(t => {
-              if (t.offsetParent) {
-                const rows = [];
-                t.querySelectorAll('tr').forEach(tr => {
-                  const cells = [];
-                  tr.querySelectorAll('td, th').forEach(cell => { cells.push(cell.innerText.trim().substring(0, 200)); });
-                  if (cells.length > 0) rows.push(cells);
-                  if (rows.length >= 20) return;
-                });
-                if (rows.length > 0 && rows.length <= 50) { result.tables.push(rows); totalLen += rows.length * 100; }
-              }
-            });
-          }
-
-          if (totalLen > maxLength) {
-            result.sections = result.sections.filter(s => s.length < 200);
-            result.links = result.links.slice(0, 10);
-          }
-
-          return result;
-        })()`,
+          expression: buildExtractContentExpression(params),
           returnByValue: true,
           awaitPromise: true,
         },
@@ -766,41 +719,11 @@ export default function chromeControllerPiExtension(pi: ExtensionAPI, options: C
       untruncated: Type.Optional(Type.Boolean({ description: 'Return full text without truncation.' })),
     }),
     async execute(_toolCallId, params, signal) {
-      const minLen = params.minTextLength ?? 30;
-      const maxResults = params.maxResults ?? 50;
-      const maxTextLen = params.untruncated ? 5000 : 500;
-
       const data = await request(
         {
           action: 'evaluateOnPage',
           tabId: params.tabId,
-          expression: `(() => {
-          const regions = [];
-          const seen = new Set();
-          const selectors = [
-            '[class*="card"], [class*="item"], [class*="result"], [class*="post"]',
-            '[class*="listing"], [class*="entry"], [class*="job"], [class*="vacancy"]',
-            '[class*="product"], [class*="review"], [class*="comment"], [class*="article"]'
-          ].join(',');
-
-          document.querySelectorAll(selectors).forEach(el => {
-            if (!el.offsetParent || el.closest('.chrome-controller-overlay-root')) return;
-            const text = el.innerText.trim();
-            if (text.length < ${minLen}) return;
-            const cls = typeof el.className === 'string' ? el.className : '';
-            const key = cls + ':' + text.substring(0, 40);
-            if (seen.has(key)) return;
-            seen.add(key);
-            const links = [];
-            el.querySelectorAll('a[href]').forEach(a => {
-              links.push({ text: a.innerText.trim().substring(0, 100), href: a.getAttribute('href') });
-            });
-            regions.push({ class: cls, text: text.substring(0, ${maxTextLen}), links: links.slice(0, 3) });
-            if (regions.length >= ${maxResults}) return;
-          });
-
-          return regions;
-        })()`,
+          expression: buildExtractRegionsExpression(params),
           returnByValue: true,
           awaitPromise: true,
         },

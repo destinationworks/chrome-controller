@@ -1068,8 +1068,13 @@ test('IPC reader accepts a line exactly at the cap and rejects one byte more', a
 
   try {
     // A line exactly at the cap must still be parsed, not dropped. It is
-    // invalid JSON, so the host answers with its parse error rather than
-    // destroying the connection.
+    // a JSON string rather than an IPC request object, so the host must reject
+    // it at the IPC boundary without forwarding anything to Chrome or destroying
+    // the connection.
+    let forwardedToChrome = 0;
+    host.sendToChrome = () => {
+      forwardedToChrome += 1;
+    };
     const filler = 'x'.repeat(MAX - 2);
     const atCap = Buffer.from(`"${filler}"`, 'utf8');
     assert.strictEqual(atCap.length, MAX);
@@ -1088,6 +1093,7 @@ test('IPC reader accepts a line exactly at the cap and rejects one byte more', a
       client.write('\n');
       const response = JSON.parse(await replied) as Record<string, unknown>;
       assert.strictEqual(response.success, false, 'an at-cap line must reach the parser');
+      assert.strictEqual(forwardedToChrome, 0, 'non-object JSON must never be forwarded to Chrome');
     } finally {
       client.destroy();
     }
@@ -1313,5 +1319,119 @@ test('target admission holds serialization and preserves quarantine after a late
       assert.equal((health.result as Record<string, unknown>).browserOutputQuarantined, true);
       assert.equal((health.result as Record<string, unknown>).sensitiveExtractionInProgress, false);
     } finally { host.close(); fs.rmSync(directory, { recursive: true, force: true }); }
+  }
+});
+
+test('IPC server rejects non-object JSON payloads and missing or non-string actions without calling sendToChrome', async () => {
+  if (process.platform === 'win32') return;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nmh-ipc-validation-'));
+  const socket = path.join(directory, 'test.sock');
+  const host = new NativeMessagingHost(socket);
+  await host.ready;
+  let chromeCalls = 0;
+  host.sendToChrome = () => {
+    chromeCalls += 1;
+  };
+
+  try {
+    for (const rawLine of ['"hello"', '123', 'true', 'null', '[1,2,3]']) {
+      const client = net.connect({ path: socket });
+      try {
+        const reply = await new Promise<Record<string, unknown>>((resolve, reject) => {
+          let buf = '';
+          client.on('error', reject);
+          client.on('data', (chunk) => {
+            buf += chunk.toString('utf8');
+            if (buf.includes('\n')) resolve(JSON.parse(buf.slice(0, buf.indexOf('\n'))));
+          });
+          client.write(rawLine + '\n');
+        });
+        assert.equal(reply.success, false, `non-object payload ${rawLine} must be rejected`);
+        assert.match(String(reply.error), /Invalid IPC JSON payload/);
+      } finally {
+        client.destroy();
+      }
+    }
+
+    for (const badReq of [{ id: 1 }, { id: 2, action: 42 }, { id: 3, action: '   ' }, { id: 4, action: null }]) {
+      const reply = await ipcRequest(socket, badReq);
+      assert.equal(reply.success, false);
+      assert.equal(reply.id, badReq.id);
+      assert.match(String(reply.error), /action/i);
+    }
+
+    assert.equal(chromeCalls, 0, 'invalid IPC payloads must never be forwarded to Chrome');
+  } finally {
+    host.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('NativeMessagingHost setupStdio handles fragmented frames and rejects oversized incoming frame headers', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nmh-frame-cap-'));
+  const socket = path.join(directory, 'test.sock');
+  const host = new NativeMessagingHost(socket);
+  await host.ready;
+  const origStdinResume = process.stdin.resume;
+  const origStdinOn = process.stdin.on;
+  const origStdoutWrite = process.stdout.write;
+  const dataListeners: Array<(chunk: Buffer) => void> = [];
+  process.stdin.resume = (() => process.stdin) as typeof process.stdin.resume;
+  process.stdin.on = ((event: string, listener: (...args: unknown[]) => void) => {
+    if (event === 'data') {
+      dataListeners.push(listener as (chunk: Buffer) => void);
+    }
+    return process.stdin;
+  }) as typeof process.stdin.on;
+
+  const stdoutFrames: Buffer[] = [];
+  process.stdout.write = ((chunk: Uint8Array | string, ...rest: unknown[]) => {
+    if (Buffer.isBuffer(chunk) && chunk.length >= 4 && chunk.readUInt32LE(0) === chunk.length - 4) {
+      stdoutFrames.push(chunk);
+      return true;
+    }
+    return origStdoutWrite.apply(process.stdout, [chunk, ...rest] as Parameters<typeof process.stdout.write>);
+  }) as typeof process.stdout.write;
+
+  try {
+    host.setupStdio();
+    assert.equal(dataListeners.length, 1);
+
+    // Send an IPC request while feeding Chrome's response across fragmented stdin chunks
+    const clientPromise = ipcRequest(socket, { action: 'queryTabs' });
+    for (let i = 0; i < 20 && stdoutFrames.length === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const rawOut = Buffer.concat(stdoutFrames);
+    const outPayload = JSON.parse(rawOut.subarray(4).toString('utf8')) as { id: number };
+    const chromeReply = Buffer.from(JSON.stringify({ id: outPayload.id, result: { tabs: ['chunked'] } }), 'utf8');
+    const header = Buffer.alloc(4);
+    header.writeUInt32LE(chromeReply.length, 0);
+    const fullFrame = Buffer.concat([header, chromeReply]);
+
+    // Split header (2+2 bytes) and split payload body across multiple data events
+    dataListeners[0](fullFrame.subarray(0, 2));
+    dataListeners[0](fullFrame.subarray(2, 10));
+    dataListeners[0](fullFrame.subarray(10));
+
+    const ipcReply = await clientPromise;
+    assert.equal(ipcReply.success, true);
+    assert.deepEqual(ipcReply.result, { tabs: ['chunked'] });
+
+    // Now feed an oversized frame header (> 64MB) across split stdin chunks
+    const oversizedHeader = Buffer.alloc(4);
+    oversizedHeader.writeUInt32LE(64 * 1024 * 1024 + 1, 0);
+    dataListeners[0](oversizedHeader.subarray(0, 2));
+    dataListeners[0](oversizedHeader.subarray(2));
+    // @ts-expect-error Host must close on oversized frame header
+    assert.equal(host.closed, true, 'oversized Chrome frame header must close the host');
+    // @ts-expect-error Buffer must be cleared
+    assert.equal(host.buffer.length, 0);
+  } finally {
+    process.stdin.resume = origStdinResume;
+    process.stdin.on = origStdinOn;
+    process.stdout.write = origStdoutWrite;
+    host.close();
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });

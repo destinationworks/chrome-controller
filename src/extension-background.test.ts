@@ -48,6 +48,9 @@ function createWorker(
   options: {
     debuggerSendCommand?: (target: unknown, method: string, params?: unknown) => Promise<unknown>;
     tabsGet?: (tabId: number) => Promise<Record<string, unknown>>;
+    tabsQuery?: (queryInfo: Record<string, unknown>) => Promise<Record<string, unknown>[]>;
+    tabsRemove?: (tabIds: number | number[]) => Promise<void>;
+    tabGroupsQuery?: (queryInfo: Record<string, unknown>) => Promise<Record<string, unknown>[]>;
     tabsSendMessage?: (tabId: number, message: Record<string, unknown>) => Promise<unknown>;
     now?: () => number;
     storageReadsFailing?: boolean;
@@ -143,19 +146,27 @@ function createWorker(
     },
     tabs: {
       onRemoved: tabRemoved,
-      async query() { queryTabsCalls += 1; return []; },
+      async query(queryInfo: Record<string, unknown> = {}) {
+        queryTabsCalls += 1;
+        return options.tabsQuery ? options.tabsQuery(queryInfo) : [];
+      },
       async get(tabId: number) { return options.tabsGet ? options.tabsGet(tabId) : { id: tabId, windowId: 1, title: '', url: '', active: true }; },
       async sendMessage(tabId: number, message: Record<string, unknown>) {
         return options.tabsSendMessage ? options.tabsSendMessage(tabId, message) : { success: true };
       },
       async group() { chromeTouches.push('tabs.group'); return 1; },
-      async remove() { removeTabCalls += 1; },
+      async remove(tabIds: number | number[]) {
+        removeTabCalls += 1;
+        if (options.tabsRemove) await options.tabsRemove(tabIds);
+      },
       async update() { chromeTouches.push('tabs.update'); return {}; },
       async create() { return {}; },
     },
     tabGroups: {
       onRemoved: eventHook(),
-      async query() { return []; },
+      async query(queryInfo: Record<string, unknown> = {}) {
+        return options.tabGroupsQuery ? options.tabGroupsQuery(queryInfo) : [];
+      },
       async get() { throw new Error('missing group'); },
       async update() { return {}; },
     },
@@ -1568,4 +1579,85 @@ test('target admission is refused while a guarded action is in flight, without r
   await worker.nativeOnMessage.emit({ id: 917, action: 'preflightSecretTarget', targetTabId: 77, sensitive: true });
   assert.deepEqual(worker.nativeMessages.find((m) => m.id === 917), { id: 917, result: { tabId: 77 } });
   assert.deepEqual(admittedTabReads, [77]);
+});
+
+test('animated typing with typingJitterMs: 0 adds zero random jitter and matches chromeWorkMs', async () => {
+  const clock = virtualClock();
+  const math = Object.create(Math) as Math;
+  math.random = () => 1 - Number.EPSILON;
+  const halfKeystroke = KEYSTROKE_ALLOWANCE_MS / 2;
+  const worker = createWorker(new Map(), {
+    timers: clock,
+    math,
+    debuggerSendCommand: (_target, method) => method === 'Input.insertText'
+      ? clock.latency(halfKeystroke, {})
+      : Promise.resolve({}),
+    tabsSendMessage: (_tabId, message) => message.action === 'visualizeAction'
+      ? clock.latency(halfKeystroke, {})
+      : Promise.resolve({}),
+  });
+  const request = {
+    id: 918,
+    action: 'sendCommand',
+    tabId: 42,
+    method: 'Input.insertText',
+    commandParams: { text: '.,', animateTyping: true, typingDelayMs: 65, typingJitterMs: 0, sound: false },
+  };
+  const { elapsed, response } = await timeNativeAction(clock, worker, request);
+  const work = chromeWorkMs('sendCommand', request);
+  assert.equal(response?.error, undefined);
+  assert.equal(work, 2 * (65 + 42 + KEYSTROKE_ALLOWANCE_MS));
+  assert.equal(elapsed, work, `typingJitterMs: 0 must not fall back to 24ms jitter; elapsed=${elapsed}, work=${work}`);
+});
+
+test('captureVideo with both negative fps and negative duration captures 0 frames without looping', async () => {
+  const clock = virtualClock();
+  const worker = createWorker(new Map(), { timers: clock });
+  const request = { id: 919, action: 'captureVideo', tabId: 42, fps: -5, duration: -3 };
+  const { elapsed, response } = await timeNativeAction(clock, worker, request);
+  assert.equal(response?.error, undefined);
+  assert.equal(response?.result.count, 0);
+  assert.equal(elapsed, 0);
+});
+
+test('cleanupManagedTabs scopes group and tab cleanup to windowId when provided', async () => {
+  const groupQueries: Record<string, unknown>[] = [];
+  const removedBatches: (number | number[])[] = [];
+  const worker = createWorker(new Map(), {
+    tabGroupsQuery: async (queryInfo) => {
+      groupQueries.push(queryInfo);
+      const groups = [
+        { id: 10, windowId: 1, title: 'AI Tool' },
+        { id: 20, windowId: 2, title: 'AI Tool' },
+      ];
+      return groups.filter((g) => queryInfo.windowId === undefined || g.windowId === queryInfo.windowId);
+    },
+    tabsQuery: async (queryInfo) => {
+      const tabs = [
+        { id: 101, groupId: 10, windowId: 1 },
+        { id: 202, groupId: 20, windowId: 2 },
+      ];
+      return tabs.filter((t) => queryInfo.windowId === undefined || t.windowId === queryInfo.windowId);
+    },
+    tabsRemove: async (tabIds) => {
+      removedBatches.push(tabIds);
+    },
+  });
+  await flushWorkerTasks();
+  await worker.nativeOnMessage.emit({ id: 920, action: 'cleanupManagedTabs', closeTabs: true, windowId: 2 });
+  const response = worker.nativeMessages.find((m) => m.id === 920);
+  assert.deepEqual(response?.result, {
+    success: true,
+    groupCount: 1,
+    tabCount: 1,
+    closedTabs: [202],
+    releasedTabs: [],
+  });
+  assert.deepEqual(removedBatches, [[202]]);
+  assert.equal(groupQueries[0]?.windowId, 2);
+
+  await worker.nativeOnMessage.emit({ id: 921, action: 'cleanupManagedTabs', closeTabs: true, windowId: null });
+  const invalidResponse = worker.nativeMessages.find((m) => m.id === 921);
+  assert.match(String(invalidResponse?.error), /Invalid windowId/);
+  assert.equal(removedBatches.length, 1, 'invalid windowId must not widen cleanup to all windows');
 });

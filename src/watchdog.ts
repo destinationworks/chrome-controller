@@ -65,7 +65,7 @@ export function probeHost(
       });
     }, timeoutMs);
 
-    const client = net.connect(socketPath, () => {
+    const client = net.connect({ path: socketPath }, () => {
       client.write(JSON.stringify({ id: 1, action: 'hostPing' }) + '\n');
     });
 

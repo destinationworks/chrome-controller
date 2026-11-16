@@ -4,6 +4,9 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { screenshotHtml } from './generate-store-assets.js';
+import { HEALTH_CHROME_WAIT_MS, ipcClientTimeoutMs } from '../dist/chrome-wait.js';
+import { IpcError, sendIpcRequest } from '../dist/ipc-client.js';
+import { getSocketPath } from '../dist/native-host.js';
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const extensionDir = path.join(repoRoot, 'Chrome Extension');
@@ -21,7 +24,7 @@ async function readDiscovery() {
     discovery = JSON.parse(await fs.readFile(discoveryPath, 'utf8'));
   } catch (error) {
     if (error?.code === 'ENOENT') {
-      throw new Error('Chrome Controller discovery data is missing. Run npm start first.');
+      throw new Error('Chrome Controller discovery data is missing. Ensure the Native Messaging host is connected or run npm start first.');
     }
     throw error;
   }
@@ -29,6 +32,36 @@ async function readDiscovery() {
     throw new Error('Chrome Controller discovery data is incomplete. Run npm start first.');
   }
   return discovery;
+}
+
+async function createTransport() {
+  const socketPath = getSocketPath();
+  try {
+    const probe = { action: 'queryTabs', timeoutMs: HEALTH_CHROME_WAIT_MS };
+    const health = await sendIpcRequest(socketPath, probe, ipcClientTimeoutMs(probe.action, probe));
+    if (health.success === false) {
+      throw new Error(health.error || 'Chrome Controller native host reported failure');
+    }
+    return {
+      request: async (payload) => {
+        const body = await sendIpcRequest(socketPath, payload, ipcClientTimeoutMs(payload.action, payload));
+        if (body.success === false) {
+          throw new Error(body.error || 'Chrome Controller IPC request failed');
+        }
+        return body.result;
+      },
+    };
+  } catch (error) {
+    if (!(error instanceof IpcError) || error.kind !== 'unavailable') {
+      throw error;
+    }
+  }
+
+  const discovery = await readDiscovery();
+  await assertExtensionConnected(discovery);
+  return {
+    request: (payload) => controllerRequest(discovery, payload),
+  };
 }
 
 async function controllerRequest(discovery, payload) {
@@ -81,8 +114,7 @@ async function closeServer(server) {
 }
 
 async function capture() {
-  const discovery = await readDiscovery();
-  await assertExtensionConnected(discovery);
+  const transport = await createTransport();
   const [iconSvg, contentScript, contentCss, manifestJson] = await Promise.all([
     fs.readFile(path.join(extensionDir, 'icon128.svg'), 'utf8'),
     fs.readFile(path.join(extensionDir, 'content.js'), 'utf8'),
@@ -93,33 +125,40 @@ async function capture() {
   const demoHtml = screenshotHtml(iconSvg);
   const { server, url } = await startDemoServer(demoHtml, iconSvg);
   let tabId;
+  let initialOverlayHidden = false;
   const temporaryPath = `${outputPath}.tmp`;
   try {
-    const tab = await controllerRequest(discovery, { action: 'createTab', url, active: true });
+    const initialOverlayState = await transport.request({ action: 'getOverlayState' });
+    initialOverlayHidden = Boolean(initialOverlayState?.overlayHidden);
+    if (initialOverlayHidden) {
+      await transport.request({ action: 'setOverlayHidden', hidden: false });
+    }
+    const tab = await transport.request({ action: 'createTab', url, active: true });
     tabId = tab.id;
     await delay(700);
-    await controllerRequest(discovery, { action: 'ensureDebugger', tabId });
-    await controllerRequest(discovery, {
+    await transport.request({ action: 'ensureDebugger', tabId });
+    await transport.request({ action: 'setOverlayHidden', hidden: false });
+    await transport.request({
       action: 'sendCommand',
       tabId,
       method: 'Emulation.setDeviceMetricsOverride',
       commandParams: { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false },
     });
     await delay(300);
-    const snapshot = await controllerRequest(discovery, { action: 'snapshotElements', tabId, showOverlay: true });
+    const snapshot = await transport.request({ action: 'snapshotElements', tabId, showOverlay: true });
     if (!snapshot?.success || !Number.isInteger(snapshot.count) || snapshot.count < 1) {
       throw new Error('The extension did not return a populated element snapshot.');
     }
-    const click = await controllerRequest(discovery, { action: 'clickSelector', tabId, selector: '#generate-report' });
+    const click = await transport.request({ action: 'clickSelector', tabId, selector: '#generate-report' });
     if (!click?.success) throw new Error('The extension did not complete the demo-page click.');
-    await controllerRequest(discovery, {
+    await transport.request({
       action: 'sendCommand',
       tabId,
       method: 'Input.dispatchMouseEvent',
       commandParams: { type: 'mouseMoved', x: 1240, y: 40 },
     });
     await delay(350);
-    const overlayEvaluation = await controllerRequest(discovery, {
+    const overlayEvaluation = await transport.request({
       action: 'sendCommand',
       tabId,
       method: 'Runtime.evaluate',
@@ -138,14 +177,14 @@ async function capture() {
     if (!overlayState?.rootPresent || overlayState.badgeCount < 1 || !overlayState.hudExpanded) {
       throw new Error(`The extension overlay was not visibly ready: ${JSON.stringify(overlayState)}`);
     }
-    await controllerRequest(discovery, {
+    await transport.request({
       action: 'sendCommand',
       tabId,
       method: 'Input.dispatchMouseEvent',
       commandParams: { type: 'mouseMoved', x: 1240, y: 40 },
     });
     await delay(100);
-    const screenshot = await controllerRequest(discovery, {
+    const screenshot = await transport.request({
       action: 'captureScreenshot',
       tabId,
       screenshotOptions: { format: 'jpeg', quality: 94, fromSurface: true, captureBeyondViewport: false },
@@ -175,9 +214,16 @@ async function capture() {
     await fs.rm(temporaryPath, { force: true });
     if (tabId) {
       try {
-        await controllerRequest(discovery, { action: 'removeTab', tabId });
+        await transport.request({ action: 'removeTab', tabId });
       } catch (error) {
         console.warn(`Could not close temporary screenshot tab ${tabId}: ${error.message}`);
+      }
+    }
+    if (initialOverlayHidden) {
+      try {
+        await transport.request({ action: 'setOverlayHidden', hidden: true });
+      } catch {
+        // Best-effort restore
       }
     }
     await closeServer(server);

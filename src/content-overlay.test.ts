@@ -189,23 +189,41 @@ test('browser: "hide overlay" checkbox and Alt+O completely remove HUD and overl
 
       // 5. Test dragging HUD to move it away from top-right corner
       await page.hover('.chrome-controller-hud');
-      const statusRow = await page.$('.chrome-controller-status-row');
-      assert.ok(statusRow);
+      await page.waitForFunction(() => {
+        const hud = document.querySelector('.chrome-controller-hud');
+        return hud ? hud.getBoundingClientRect().width >= 300 : false;
+      });
+      const statusEl = await page.$('.chrome-controller-status');
+      assert.ok(statusEl);
       const initialHudPos = await page.evaluate(() => {
         const hud = document.querySelector('.chrome-controller-hud');
         const rect = hud!.getBoundingClientRect();
         return { left: rect.left, top: rect.top };
       });
 
-      // Perform drag gesture
-      const statusBox = await statusRow.boundingBox();
+      // Perform drag gesture on the status label inside statusRow (expanded, clear of audio button)
+      const statusBox = await statusEl.boundingBox();
       assert.ok(statusBox);
-      await page.mouse.move(statusBox.x + 10, statusBox.y + 10);
+      await page.mouse.move(statusBox.x + statusBox.width / 2, statusBox.y + statusBox.height / 2);
       await page.mouse.down();
+
+      // Verify dragging state locks expanded HUD dimensions without CSS transition jitter
+      const duringDrag = await page.evaluate(() => {
+        const root = document.getElementById('chrome-controller-overlay-root');
+        const hud = document.querySelector('.chrome-controller-hud');
+        return {
+          hasDraggingClass: root ? root.classList.contains('chrome-controller-dragging') : false,
+          hudTransition: hud ? window.getComputedStyle(hud).transitionProperty : null,
+        };
+      });
+      assert.equal(duringDrag.hasDraggingClass, true, 'root must have chrome-controller-dragging class during drag');
+      assert.equal(duringDrag.hudTransition, 'none', 'HUD CSS transitions must be disabled during drag');
+
       await page.mouse.move(100, 300);
       await page.mouse.up();
 
       const draggedHudPos = await page.evaluate(() => {
+        const root = document.getElementById('chrome-controller-overlay-root');
         const hud = document.querySelector('.chrome-controller-hud');
         const rect = hud!.getBoundingClientRect();
         const stored = sessionStorage.getItem('chrome_controller_hud_pos');
@@ -213,11 +231,58 @@ test('browser: "hide overlay" checkbox and Alt+O completely remove HUD and overl
           left: rect.left,
           top: rect.top,
           stored,
+          hasDraggingClass: root ? root.classList.contains('chrome-controller-dragging') : true,
         };
       });
 
+      assert.equal(draggedHudPos.hasDraggingClass, false, 'chrome-controller-dragging class must be removed on mouseup');
       assert.notEqual(draggedHudPos.left, initialHudPos.left, 'HUD position changed after drag');
+      assert.ok(draggedHudPos.left < 200, `HUD moved to target x region (got left=${draggedHudPos.left})`);
       assert.ok(draggedHudPos.stored, 'HUD position stored in sessionStorage');
+
+      // 6. Test logAction HTML escaping (no DOM XSS when selector/text contains HTML)
+      await dispatchMessage({
+        action: 'visualizeAction',
+        type: 'insertText',
+        detail: '<img id="xss-probe" src=x onerror="window.__xss=true">',
+        sound: false,
+      });
+      const xssCheck = await page.evaluate(() => {
+        const probe = document.getElementById('xss-probe');
+        const detailEl = document.querySelector('.chrome-controller-feed li b');
+        return {
+          probeExists: Boolean(probe),
+          xssTriggered: Boolean((window as any).__xss),
+          detailText: detailEl ? detailEl.textContent : null,
+        };
+      });
+      assert.equal(xssCheck.probeExists, false, 'HTML inside logAction detail must not be parsed as DOM nodes');
+      assert.equal(xssCheck.xssTriggered, false, 'XSS payload must not execute');
+      assert.ok(xssCheck.detailText?.startsWith('<img id="xss-probe"'), 'literal text must be rendered');
+
+      // 7. Test console.error formatting for Error instances, circular references, and BigInt
+      await page.evaluate(() => {
+        console.error(new Error('synthetic-error-msg'));
+        const circular: Record<string, unknown> = { label: 'circ' };
+        circular.self = circular;
+        console.error(circular);
+        console.error({ count: 42n });
+      });
+      const pageErrorsRes = await dispatchMessage({ action: 'getPageErrors' });
+      assert.equal(pageErrorsRes.success, true);
+      const errorMessages = (pageErrorsRes.errors as Array<{ message: string; stack: string | null }>).map((e) => e.message);
+      assert.ok(
+        errorMessages.some((m) => m.includes('synthetic-error-msg')),
+        `Error instance message must be captured instead of "{}"; got: ${JSON.stringify(errorMessages)}`
+      );
+      assert.ok(
+        errorMessages.some((m) => m.includes('[object Object]')),
+        `Circular console.error must be captured without throwing; got: ${JSON.stringify(errorMessages)}`
+      );
+      assert.ok(
+        errorMessages.some((m) => m.includes('"42n"')),
+        `BigInt console.error must be formatted via replacer; got: ${JSON.stringify(errorMessages)}`
+      );
     } finally {
       await browser.close();
     }

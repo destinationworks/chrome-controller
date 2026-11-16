@@ -100,10 +100,15 @@
 }
 
 .chrome-controller-hud:hover,
-.chrome-controller-hud:focus-within {
+.chrome-controller-hud:focus-within,
+.chrome-controller-dragging .chrome-controller-hud {
   width: min(360px, calc(100vw - 36px));
   max-height: 260px;
   padding: 12px 13px;
+}
+
+.chrome-controller-dragging .chrome-controller-hud {
+  transition: none !important;
 }
 
 .chrome-controller-status-row {
@@ -143,12 +148,12 @@
   text-shadow: 0 0 14px rgba(112, 233, 255, 0.88);
 }
 
-.chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-status-row {
+#chrome-controller-overlay-root:not(.chrome-controller-dragging) .chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-status-row {
   justify-content: center;
   gap: 0;
 }
 
-.chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-status-glyph {
+#chrome-controller-overlay-root:not(.chrome-controller-dragging) .chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-status-glyph {
   position: absolute;
   left: 50%;
   top: 50%;
@@ -157,7 +162,7 @@
   transform: translate(-50%, -50%);
 }
 
-.chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-status-dot {
+#chrome-controller-overlay-root:not(.chrome-controller-dragging) .chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-status-dot {
   position: absolute;
   right: 7px;
   top: 7px;
@@ -167,7 +172,8 @@
 }
 
 .chrome-controller-hud:hover .chrome-controller-status-dot,
-.chrome-controller-hud:focus-within .chrome-controller-status-dot {
+.chrome-controller-hud:focus-within .chrome-controller-status-dot,
+.chrome-controller-dragging .chrome-controller-status-dot {
   position: static;
   width: 9px;
   height: 9px;
@@ -190,12 +196,12 @@
   white-space: nowrap;
 }
 
-.chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-status,
-.chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-tab,
-.chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-coords,
-.chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-typing,
-.chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-feed,
-.chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-settings {
+#chrome-controller-overlay-root:not(.chrome-controller-dragging) .chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-status,
+#chrome-controller-overlay-root:not(.chrome-controller-dragging) .chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-tab,
+#chrome-controller-overlay-root:not(.chrome-controller-dragging) .chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-coords,
+#chrome-controller-overlay-root:not(.chrome-controller-dragging) .chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-typing,
+#chrome-controller-overlay-root:not(.chrome-controller-dragging) .chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-feed,
+#chrome-controller-overlay-root:not(.chrome-controller-dragging) .chrome-controller-hud:not(:hover):not(:focus-within) .chrome-controller-settings {
   display: none;
 }
 
@@ -479,7 +485,8 @@ html:has(#chrome-controller-overlay-root.chrome-controller-hidden-overlay) #chro
   }
 
   .chrome-controller-hud:hover,
-  .chrome-controller-hud:focus-within {
+  .chrome-controller-hud:focus-within,
+  #chrome-controller-overlay-root.chrome-controller-dragging .chrome-controller-hud {
     left: 12px;
     right: 12px;
     width: auto;
