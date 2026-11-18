@@ -112,6 +112,7 @@ test('captureVideo budgets every frame, from the extension defaults when none ar
   // Negative frame counts never run a loop in the extension.
   assert.equal(chromeWorkMs('captureVideo', { tabId: 1, fps: 5, duration: -3 }), 0);
   assert.equal(chromeWorkMs('captureVideo', { tabId: 1, fps: -5, duration: 3 }), 0);
+  assert.equal(chromeWorkMs('captureVideo', { tabId: 1, fps: -5, duration: -3 }), 0);
   // A vanishing frame rate yields no frames rather than 0 x Infinity = NaN.
   assert.equal(chromeWorkMs('captureVideo', { tabId: 1, fps: 5e-324, duration: 3 }), 0);
   // 120 frames could need 139 s in the worst case but need only 4 s of sleeps:
@@ -176,6 +177,7 @@ test('animated typing budgets every keystroke at its worst case', () => {
   assert.equal(chromeWorkMs('sendCommand', typing('ab')), 2 * (65 + 24 + 42 + KEYSTROKE_ALLOWANCE_MS));
   // The extension clamps the delay to 12..240 ms and the jitter to 0..80 ms.
   assert.equal(chromeWorkMs('sendCommand', typing('a', { typingDelayMs: 1, typingJitterMs: 500 })), 12 + 80 + 8 + KEYSTROKE_ALLOWANCE_MS);
+  assert.equal(chromeWorkMs('sendCommand', typing('a', { typingDelayMs: 65, typingJitterMs: 0 })), 65 + 0 + 42 + KEYSTROKE_ALLOWANCE_MS);
   assert.equal(chromeWorkMs('sendCommand', typing('a', { typingDelayMs: 9999 })), 240 + 24 + 156 + KEYSTROKE_ALLOWANCE_MS);
   // A non-numeric delay makes the extension's sleeps fire at once.
   assert.equal(chromeWorkMs('sendCommand', typing('a', { typingDelayMs: 'slow' })), 24 + KEYSTROKE_ALLOWANCE_MS);

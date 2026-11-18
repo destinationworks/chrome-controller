@@ -861,3 +861,69 @@ test('pi: a 22 s capture measured on a live Chrome reaches the caller', async (t
   assert.deepEqual(result.details.result, { count: 60 });
 });
 
+test('chrome_cleanup_ai_tabs forwards windowId when provided', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
+
+  let sentPayload: Record<string, unknown> | undefined;
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    sentPayload = JSON.parse(options?.body as string);
+    return {
+      ok: true,
+      json: async () => ({ success: true, result: { closedTabs: [5] } }),
+    } as Response;
+  };
+  try {
+    await pi.tools['chrome_cleanup_ai_tabs'].execute('call_1', { closeTabs: true, windowId: 9 }, undefined);
+    assert.equal(sentPayload?.action, 'cleanupManagedTabs');
+    assert.equal(sentPayload?.closeTabs, true);
+    assert.equal(sentPayload?.windowId, 9);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('chrome_extract_content and chrome_extract_regions sanitize non-numeric parameters into finite numbers', async () => {
+  const pi = makeMockPi();
+  chromeControllerPiExtension(pi as unknown as ExtensionAPI);
+
+  const expressions: string[] = [];
+  const originalFetch = global.fetch;
+  global.fetch = async (_url: unknown, options?: RequestInit) => {
+    const body = JSON.parse(options?.body as string) as { expression: string };
+    expressions.push(body.expression);
+    return {
+      ok: true,
+      json: async () => ({ success: true, result: {} }),
+    } as Response;
+  };
+  try {
+    await pi.tools['chrome_extract_content'].execute(
+      'call_1',
+      { tabId: 1, maxDepth: '1; alert(1)' as unknown as number, maxLength: NaN },
+      undefined,
+    );
+    await pi.tools['chrome_extract_regions'].execute(
+      'call_2',
+      { tabId: 1, minTextLength: '1); alert(2); //' as unknown as number, maxResults: Infinity },
+      undefined,
+    );
+    await pi.tools['chrome_extract_content'].execute(
+      'call_3',
+      { tabId: 1, maxDepth: null as unknown as number, maxLength: '' as unknown as number },
+      undefined,
+    );
+    assert.ok(!expressions[0].includes('alert(1)'), 'maxDepth must be coerced to a safe finite number');
+    assert.match(expressions[0], /const maxDepth = 3;/);
+    assert.match(expressions[0], /const maxLength = 15000;/);
+    assert.ok(!expressions[1].includes('alert(2)'), 'minTextLength must be coerced to a safe finite number');
+    assert.match(expressions[1], /text\.length < 30/);
+    assert.match(expressions[1], /regions\.length >= 50/);
+    assert.match(expressions[2], /const maxDepth = 3;/, 'null must fall back to default, not 0');
+    assert.match(expressions[2], /const maxLength = 15000;/, 'empty string must fall back to default, not 0');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+

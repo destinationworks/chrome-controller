@@ -87,9 +87,24 @@ window.addEventListener('unhandledrejection', (event) => {
 });
 
 // Patch console.error
+function formatConsoleArg(arg) {
+  if (arg instanceof Error) {
+    return arg.stack || arg.message || String(arg);
+  }
+  if (typeof arg === 'object' && arg !== null) {
+    try {
+      return JSON.stringify(arg, (_key, val) => (typeof val === 'bigint' ? `${val}n` : val));
+    } catch {
+      return Object.prototype.toString.call(arg);
+    }
+  }
+  return String(arg);
+}
+
 const origConsoleError = console.error;
 console.error = function (...args) {
-  recordError('console.error', args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '));
+  const firstError = args.find((a) => a instanceof Error);
+  recordError('console.error', args.map(formatConsoleArg).join(' '), location.href, 0, 0, firstError?.stack);
   origConsoleError.apply(console, args);
 };
 
@@ -169,11 +184,16 @@ function wireOverlayControls(root) {
     statusRow.title = 'Drag to reposition HUD';
     statusRow.addEventListener('mousedown', (e) => {
       if (e.target.closest('button') || e.target.closest('input')) return;
+      root.classList.add('chrome-controller-dragging');
       const rect = hud.getBoundingClientRect();
       const startX = e.clientX;
       const startY = e.clientY;
       const startLeft = rect.left;
       const startTop = rect.top;
+      hud.style.left = `${Math.round(startLeft)}px`;
+      hud.style.top = `${Math.round(startTop)}px`;
+      hud.style.right = 'auto';
+      hud.style.bottom = 'auto';
       statusRow.style.cursor = 'grabbing';
       e.preventDefault();
       e.stopPropagation();
@@ -192,6 +212,7 @@ function wireOverlayControls(root) {
       };
 
       const onMouseUp = () => {
+        root.classList.remove('chrome-controller-dragging');
         statusRow.style.cursor = 'grab';
         window.removeEventListener('mousemove', onMouseMove, true);
         window.removeEventListener('mouseup', onMouseUp, true);
@@ -236,7 +257,14 @@ function setStatus(status, detail) {
 function logAction(label, detail) {
   const feed = ensureOverlay().querySelector('.chrome-controller-feed');
   const item = document.createElement('li');
-  item.innerHTML = `<span>${label}</span>${detail ? `<b>${truncate(detail, 42)}</b>` : ''}`;
+  const labelSpan = document.createElement('span');
+  labelSpan.textContent = String(label || '');
+  item.appendChild(labelSpan);
+  if (detail) {
+    const detailBold = document.createElement('b');
+    detailBold.textContent = truncate(detail, 42);
+    item.appendChild(detailBold);
+  }
   feed.prepend(item);
   while (feed.children.length > MAX_FEED_ITEMS) {
     feed.lastElementChild.remove();

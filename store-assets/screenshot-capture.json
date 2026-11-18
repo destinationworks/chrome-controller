@@ -1,14 +1,14 @@
 {
   "source": "live-extension",
   "manifestName": "p agent extension",
-  "capturedManifestVersion": "1.2.0",
+  "capturedManifestVersion": "1.3.2",
   "demoHtmlSha256": "6628ba8944be15d878b3a412a227250e38af9a655ea60258771ac219f3084e77",
-  "contentScriptSha256": "bf570221a9b99b08ebe26ae23aec356d3d4e0096fdc13a93624fa9f464c7e9b9",
-  "contentCssSha256": "63a0f7f65243e8d87ab044343182775a91b7ca97779d3c7331cb27d687293df3",
+  "contentScriptSha256": "a31072fc3f4b91d9ee7c7e241c26e489f8e7b1de9e6a0e9c557b9bc2fa5ae3d3",
+  "contentCssSha256": "1a81da80ce83fb74e660fa011af42a4dca9a96aae6a4086091a461265af6b432",
   "width": 1280,
   "height": 800,
   "snapshotElementCount": 1,
   "overlayBadgeCount": 1,
   "hudExpanded": true,
-  "sha256": "471bfe9cceeca526a384b6e176577ca697e650976a5907d9070d5e0efc78f5b7"
+  "sha256": "c7ed319d9d7e9c7420d3e340c721c56c80751c635da48cb12baf4e5d548a5af6"
 }

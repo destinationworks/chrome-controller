@@ -18,6 +18,7 @@ import {
   buildMouseBatch,
   buildTypeTextBatch,
   buildHealthReport,
+  handleMcpToolCall,
   HOST_STATE_REMEDIATION,
   HEALTH_PROBE_TIMEOUT_MS,
   HEALTH_CHROME_WAIT_MS,
@@ -1054,6 +1055,9 @@ const NATIVE_ONLY_CASES = [
   ['extractSecretGuarded', {}],
   ['injectSecretGuarded', { value: 'not-a-real-secret' }],
   ['evaluateOnPage', { sensitive: true }],
+  ['batch', { actions: [{ action: 'extractSecretGuarded' }] }],
+  ['batch', { commands: [{ action: 'injectSecretGuarded', value: 'not-a-real-secret' }] }],
+  ['batch', { actions: [{ action: 'evaluateOnPage', sensitive: true }] }],
 ] as const;
 
 test('sendCommand keeps native-only actions on IPC even when HTTP_PORT routes everything else to the relay', IPC_TEST, async () => {
@@ -1489,4 +1493,43 @@ test('over the real relay, the input tools get the whole batch result, including
     await new Promise((resolve) => setTimeout(resolve, 50));
     relay.close();
   }
+});
+
+test('handleMcpToolCall sanitizes extract parameters and forwards windowId on cleanup', async () => {
+  const calls: Array<{ action: string; params?: Record<string, unknown> }> = [];
+  const fakeRun = async (action: string, params?: Record<string, unknown>) => {
+    calls.push({ action, params });
+    return { ok: true };
+  };
+
+  await handleMcpToolCall('chrome_extract_content', {
+    tabId: 5,
+    maxDepth: '2; alert(1)',
+    maxLength: null,
+  }, fakeRun);
+  await handleMcpToolCall('chrome_extract_regions', {
+    tabId: 5,
+    minTextLength: '',
+    maxResults: '10); alert(2)',
+  }, fakeRun);
+  await handleMcpToolCall('chrome_cleanup_ai_tabs', {
+    closeTabs: true,
+    windowId: 12,
+  }, fakeRun);
+
+  assert.equal(calls.length, 3);
+  const contentExpr = String(calls[0].params?.expression);
+  assert.ok(!contentExpr.includes('alert(1)'));
+  assert.match(contentExpr, /const maxDepth = 3;/);
+  assert.match(contentExpr, /const maxLength = 15000;/);
+
+  const regionsExpr = String(calls[1].params?.expression);
+  assert.ok(!regionsExpr.includes('alert(2)'));
+  assert.match(regionsExpr, /text\.length < 30/);
+  assert.match(regionsExpr, /regions\.length >= 50/);
+
+  assert.deepEqual(calls[2], {
+    action: 'cleanupManagedTabs',
+    params: { closeTabs: true, windowId: 12 },
+  });
 });

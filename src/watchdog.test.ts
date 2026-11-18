@@ -538,3 +538,28 @@ test('runCli --recover on a wedged host with no PID file signals nothing', async
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('probeHost treats a numeric socketPath as a filesystem path, never a TCP port', async () => {
+  if (process.platform === 'win32') return;
+  const tcpServer = net.createServer((socket) => {
+    socket.write(JSON.stringify({ id: 1, success: true, result: { pong: true, pid: 99999 } }) + '\n');
+  });
+  await new Promise<void>((resolve) => tcpServer.listen(0, '127.0.0.1', resolve));
+  const tcpPort = (tcpServer.address() as net.AddressInfo).port;
+  const cwd = process.cwd();
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wd-numeric-path-'));
+  // Create a dummy file named `${tcpPort}` so fs.existsSync(String(tcpPort)) is true
+  const numericFile = path.join(tmpDir, String(tcpPort));
+  fs.writeFileSync(numericFile, '');
+  process.chdir(tmpDir);
+  try {
+    const result = await probeHost(String(tcpPort), 500);
+    // Must NOT connect to 127.0.0.1:tcpPort and report 'alive' with pid 99999!
+    assert.notEqual(result.state, 'alive', 'numeric socketPath must not dial TCP port');
+    assert.notEqual(result.pid, 99999);
+  } finally {
+    process.chdir(cwd);
+    await new Promise<void>((resolve) => tcpServer.close(() => resolve()));
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

@@ -608,3 +608,37 @@ test('a request that cannot finish within the cap is refused before it reaches t
     await host.close();
   }
 });
+
+test('sensitive requests never skip IPC for CHROME_CONTROLLER_URL and never fall back to the HTTP relay', async () => {
+  const host = await startFakeHost((_req, socket) => socket.write('{"success":true,"result":"ipc-only"}\n'));
+  process.env.CHROME_CONTROLLER_URL = 'http://127.0.0.1:8898';
+  process.env.CHROME_CONTROLLER_API_KEY = TEST_API_KEY;
+  allowRelay();
+  const tools = loadTools();
+  try {
+    const viaIpc = parsed(
+      await tools['chrome_batch'].execute(
+        'c1',
+        { mode: 'sequential', actions: [{ action: 'extractSecretGuarded', tabId: 1 }], stopOnError: true },
+        undefined,
+      ),
+    );
+    assert.equal(viaIpc.result, 'ipc-only');
+    assert.equal(host.requests.length, 1);
+    assert.deepEqual(relayCalls, [], 'sensitive batch must never be sent over CHROME_CONTROLLER_URL');
+  } finally {
+    await host.close();
+  }
+
+  process.env.CHROME_CONTROLLER_SOCKET = path.join(tmpDir, 'missing-sensitive.sock');
+  await assert.rejects(
+    () =>
+      tools['chrome_batch'].execute(
+        'c2',
+        { mode: 'sequential', actions: [{ action: 'injectSecretGuarded', tabId: 1 }], stopOnError: true },
+        undefined,
+      ),
+    /This action carries sensitive data and is never sent over the relay/,
+  );
+  assert.deepEqual(relayCalls, [], 'sensitive batch must never fall back to the relay when IPC is down');
+});

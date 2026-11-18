@@ -75,6 +75,8 @@ While actively working, reread `user-updates.md` for new instructions at least o
 - Guarded operations must admit the target through metadata-only `targetTabId` preflight before capture/reservation; unsupported or inaccessible targets fail closed without fallback or quarantine reset.
 - The worker's protected-tab lock is checked on entry, between sequential batch items, and before any non-sensitive reply (`browserOutputLock` in `Chrome Extension/background.js`). A new code path that acts or answers after an await must re-check it, with the request's entry `outputLockEpoch`.
 - `src/ipc-client.ts` is the only IPC client; the Pi extension and the MCP server both wrap it. Do not add another copy: a transport fix landed in one copy and not the other.
+- Never rest-destructure (`const { ...params } = parsed`) the result of `JSON.parse` before verifying `parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)`: spreading a JSON string or array enumerates every indexed character or element.
+- When converting a `right`- or `bottom`-anchored DOM element into `left`/`top` coordinates on `mousedown` for dragging, disable CSS transitions before calling `getBoundingClientRect()` so mid-transition dimensions cannot corrupt the drag origin.
 
 ## Chrome Web Store
 

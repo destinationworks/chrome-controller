@@ -92,7 +92,7 @@ async function prepareSocketPath(socketPath: string): Promise<void> {
   }
 
   await new Promise<void>((resolve, reject) => {
-    const probe = net.connect(socketPath);
+    const probe = net.connect({ path: socketPath });
     const timeout = setTimeout(() => {
       probe.destroy();
       reject(new Error(`Native Host socket state is indeterminate: ${socketPath}`));
@@ -156,6 +156,7 @@ const MIN_DERIVED_SECRET_LENGTH = 4;
 const MAX_SENSITIVE_GUARDS = 64;
 const MAX_SENSITIVE_VALUE_BYTES = 1024 * 1024;
 const MAX_GUARD_TTL_SECONDS = 24 * 60 * 60;
+const MAX_NATIVE_MESSAGE_BYTES = 64 * 1024 * 1024; // Chrome's 64MB Native Messaging frame limit
 
 interface SensitiveOutputGuard {
   value: string;
@@ -250,6 +251,8 @@ function stripInternalSensitiveParams(params: Record<string, unknown>): Record<s
 
 export class NativeMessagingHost {
   private buffer: Buffer = Buffer.alloc(0);
+  private stdinChunks: Buffer[] = [];
+  private stdinChunkBytes = 0;
   private expectedLength: number | null = null;
   private pendingRequests = new Map<number, { resolve: (val: unknown) => void; reject: (err: Error) => void }>();
   private requestIdCounter = 1;
@@ -275,7 +278,11 @@ export class NativeMessagingHost {
 
   private setupStdio() {
     process.stdin.on('data', (chunk: Buffer) => {
-      this.buffer = Buffer.concat([this.buffer, chunk]);
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (buf.length > 0) {
+        this.stdinChunks.push(buf);
+        this.stdinChunkBytes += buf.length;
+      }
       this.processBuffer();
     });
 
@@ -296,15 +303,36 @@ export class NativeMessagingHost {
     this.isConnectedToChrome = true;
   }
 
+  private flushStdinChunks(): void {
+    if (this.stdinChunks.length === 0) return;
+    this.buffer = this.buffer.length === 0
+      ? Buffer.concat(this.stdinChunks, this.stdinChunkBytes)
+      : Buffer.concat([this.buffer, ...this.stdinChunks], this.buffer.length + this.stdinChunkBytes);
+    this.stdinChunks = [];
+    this.stdinChunkBytes = 0;
+  }
+
   private processBuffer() {
     while (true) {
+      const totalAvailable = this.buffer.length + this.stdinChunkBytes;
       if (this.expectedLength === null) {
-        if (this.buffer.length < 4) return;
+        if (totalAvailable < 4) return;
+        this.flushStdinChunks();
         this.expectedLength = this.buffer.readUInt32LE(0);
         this.buffer = this.buffer.subarray(4);
+        if (this.expectedLength > MAX_NATIVE_MESSAGE_BYTES) {
+          console.error(`Chrome Native Messaging frame exceeds maximum size (${this.expectedLength} > ${MAX_NATIVE_MESSAGE_BYTES} bytes)`);
+          this.expectedLength = null;
+          this.buffer = Buffer.alloc(0);
+          this.stdinChunks = [];
+          this.stdinChunkBytes = 0;
+          this.close();
+          return;
+        }
       }
 
-      if (this.buffer.length < this.expectedLength) return;
+      if (this.buffer.length + this.stdinChunkBytes < this.expectedLength) return;
+      this.flushStdinChunks();
 
       const messageBuf = this.buffer.subarray(0, this.expectedLength);
       this.buffer = this.buffer.subarray(this.expectedLength);
@@ -709,48 +737,65 @@ export class NativeMessagingHost {
           pendingLen += tail.length;
         }
 
+        const writeLine = (payload: Record<string, unknown>) => {
+          if (!client.destroyed && client.writable) {
+            client.write(JSON.stringify(payload) + '\n');
+          }
+        };
+
         for (const lineBytes of lines) {
           const line = lineBytes.toString('utf8');
           if (!line.trim()) continue;
+          let parsed: unknown;
           try {
-            const req = JSON.parse(line) as { id?: number; action: string; [key: string]: unknown };
-            const { action, id, ...params } = req;
-            try {
-              if (action === 'hostPing') {
-                client.write(JSON.stringify({ id, success: true, result: this.livenessSnapshot() }) + '\n');
-                continue;
-              }
-              if (this.browserOutputQuarantined) {
-                throw new Error('Browser output is quarantined after an indeterminate guarded extraction; close the source tab manually before restarting the native host');
-              }
-              if (this.sensitiveExtractionInProgress) {
-                throw new Error('Browser output is locked during guarded extraction');
-              }
-              if (action === 'extractSecretGuarded') {
-                const result = await this.extractSecretGuarded(params);
-                client.write(JSON.stringify({ id, success: true, result }) + '\n');
-                continue;
-              }
-              if (action === 'injectSecretGuarded') {
-                const result = await this.injectSecretGuarded(params);
-                client.write(JSON.stringify({ id, success: true, result }) + '\n');
-                continue;
-              }
-              const result = await this.requestFromChrome(action, stripInternalSensitiveParams(params));
-              client.write(JSON.stringify({
-                id,
-                success: true,
-                result: this.sanitizeSensitiveOutput(result),
-              }) + '\n');
-            } catch (err) {
-              client.write(JSON.stringify({
-                id,
-                success: false,
-                error: this.sanitizeSensitiveOutput((err as Error).message),
-              }) + '\n');
-            }
+            parsed = JSON.parse(line);
           } catch {
-            client.write(JSON.stringify({ success: false, error: 'Invalid IPC JSON payload' }) + '\n');
+            writeLine({ success: false, error: 'Invalid IPC JSON payload' });
+            continue;
+          }
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            writeLine({ success: false, error: 'Invalid IPC JSON payload' });
+            continue;
+          }
+          const req = parsed as { id?: number; action?: unknown; [key: string]: unknown };
+          const { action, id, ...params } = req;
+          if (typeof action !== 'string' || !action.trim()) {
+            writeLine({ id, success: false, error: 'IPC request requires a non-empty string action' });
+            continue;
+          }
+          try {
+            if (action === 'hostPing') {
+              writeLine({ id, success: true, result: this.livenessSnapshot() });
+              continue;
+            }
+            if (this.browserOutputQuarantined) {
+              throw new Error('Browser output is quarantined after an indeterminate guarded extraction; close the source tab manually before restarting the native host');
+            }
+            if (this.sensitiveExtractionInProgress) {
+              throw new Error('Browser output is locked during guarded extraction');
+            }
+            if (action === 'extractSecretGuarded') {
+              const result = await this.extractSecretGuarded(params);
+              writeLine({ id, success: true, result });
+              continue;
+            }
+            if (action === 'injectSecretGuarded') {
+              const result = await this.injectSecretGuarded(params);
+              writeLine({ id, success: true, result });
+              continue;
+            }
+            const result = await this.requestFromChrome(action, stripInternalSensitiveParams(params));
+            writeLine({
+              id,
+              success: true,
+              result: this.sanitizeSensitiveOutput(result),
+            });
+          } catch (err) {
+            writeLine({
+              id,
+              success: false,
+              error: this.sanitizeSensitiveOutput((err as Error).message),
+            });
           }
         }
       });
